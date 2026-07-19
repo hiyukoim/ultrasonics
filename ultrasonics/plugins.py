@@ -247,6 +247,7 @@ def applet_run(applet_id):
     from datetime import datetime
     from ultrasonics.tools import history, notifications
     from ultrasonics.tools import unmatched as unmatched_module
+    from ultrasonics.tools.capability_guard import validate_applet, apply_track_limits
 
     runtime = datetime.now()
     history_id = history.record_start(applet_id)
@@ -263,6 +264,9 @@ def applet_run(applet_id):
                 f"An input or output plugin is missing for applet {applet_id} - will not run.")
 
         else:
+            # T12: validate capability before running
+            validate_applet(applet_plans)
+
             songs_dict = []
 
             def get_info(plugin):
@@ -283,8 +287,11 @@ def applet_run(applet_id):
 
             "Outputs"
             for plugin in applet_plans["outputs"]:
+                # T12: enforce per-adapter track limit before writing
+                output_name = plugin["plugin"]
+                limited_songs_dict = apply_track_limits(songs_dict, output_name)
                 plugin_run(*get_info(plugin), component="outputs",
-                           applet_id=applet_id, songs_dict=songs_dict)
+                           applet_id=applet_id, songs_dict=limited_songs_dict)
 
             n_playlists = len(songs_dict)
             n_tracks = sum(len(p.get("songs", [])) for p in songs_dict)

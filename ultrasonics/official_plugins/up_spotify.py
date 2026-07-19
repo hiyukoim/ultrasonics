@@ -32,7 +32,7 @@ handshake = {
     "name": "spotify",
     "description": "sync your playlists to and from spotify",
     "type": ["inputs", "outputs"],
-    "mode": ["playlists"],
+    "mode": ["playlists", "saved", "favorites", "albums", "artists"],
     "version": "0.5",
     "settings": [
         {"type": "auth", "label": "Authorise Spotify", "path": "/spotify/auth/request"},
@@ -545,6 +545,36 @@ def run(settings_dict, **kwargs):
 
     s.sp = spotipy.Spotify(auth=s.token_get(), requests_timeout=60)
 
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _spotify_album_to_dict(album):
+        """Convert a Spotify saved-album entry to songs_dict format."""
+        upc = None
+        try:
+            upc = album["external_ids"]["upc"]
+        except (KeyError, TypeError):
+            pass
+        artists = [a["name"] for a in album.get("artists", [])]
+        item = {
+            "name": album.get("name", ""),
+            "artists": artists,
+            "id": {"spotify": album["id"]},
+        }
+        if upc:
+            item["upc"] = upc
+        if album.get("release_date"):
+            item["date"] = album["release_date"]
+        return {k: v for k, v in item.items() if v}
+
+    def _spotify_artist_to_dict(artist):
+        item = {
+            "name": artist.get("name", ""),
+            "id": {"spotify": artist["id"]},
+        }
+        if artist.get("genres"):
+            item["genres"] = artist["genres"]
+        return {k: v for k, v in item.items() if v}
+
     if component == "inputs":
         if settings_dict["mode"] == "playlists":
             # Playlists mode
@@ -632,8 +662,179 @@ def run(settings_dict, **kwargs):
                     "Initial run of this plugin will not return a songs_dict. Database is now updated. Next run will continue as normal."
                 )
 
+        elif settings_dict["mode"] == "favorites":
+            # Read: all saved (liked) tracks
+            limit = 50
+            offset = 0
+            all_saved = []
+            while True:
+                resp = s.request(s.sp.current_user_saved_tracks, limit=limit, offset=offset)
+                items = resp.get("items", [])
+                if not items:
+                    break
+                for item in items:
+                    t = item.get("track")
+                    if t:
+                        try:
+                            all_saved.append(s.spotify_to_songs_dict(t))
+                        except Exception:
+                            pass
+                offset += limit
+                if len(items) < limit:
+                    break
+            songs_dict = [{"name": "Favorites", "id": {"spotify": "__favorites__"}, "songs": all_saved}]
+            return songs_dict
+
+        elif settings_dict["mode"] == "albums":
+            limit = 50
+            offset = 0
+            all_albums = []
+            while True:
+                resp = s.request(s.sp.current_user_saved_albums, limit=limit, offset=offset)
+                items = resp.get("items", [])
+                if not items:
+                    break
+                for item in items:
+                    album = item.get("album")
+                    if album:
+                        all_albums.append(_spotify_album_to_dict(album))
+                offset += limit
+                if len(items) < limit:
+                    break
+            songs_dict = [{"name": "Albums", "id": {"spotify": "__albums__"}, "songs": all_albums}]
+            return songs_dict
+
+        elif settings_dict["mode"] == "artists":
+            limit = 50
+            after = None
+            all_artists = []
+            while True:
+                params = {"limit": limit}
+                if after:
+                    params["after"] = after
+                resp = s.request(s.sp.current_user_followed_artists, **params)
+                artists_page = resp.get("artists", {})
+                items = artists_page.get("items", [])
+                if not items:
+                    break
+                for a in items:
+                    all_artists.append(_spotify_artist_to_dict(a))
+                cursor = artists_page.get("cursors", {})
+                after = cursor.get("after")
+                if not after or len(items) < limit:
+                    break
+            songs_dict = [{"name": "Artists", "id": {"spotify": "__artists__"}, "songs": all_artists}]
+            return songs_dict
+
     else:
         "Outputs mode"
+
+        mode = settings_dict.get("mode", "playlists")
+
+        if mode == "favorites":
+            # Save (like) all incoming tracks in Spotify library
+            existing_resp = s.request(s.sp.current_user_saved_tracks, limit=1)
+            existing_ids = set()
+            limit = 50
+            offset = 0
+            while True:
+                resp = s.request(s.sp.current_user_saved_tracks, limit=limit, offset=offset)
+                items = resp.get("items", [])
+                if not items:
+                    break
+                for item in items:
+                    t = item.get("track")
+                    if t and t.get("id"):
+                        existing_ids.add(t["id"])
+                offset += limit
+                if len(items) < limit:
+                    break
+
+            for playlist in songs_dict:
+                new_ids = []
+                for song in playlist.get("songs", []):
+                    uri, confidence = s.search(song)
+                    sp_id = uri.replace("spotify:track:", "") if uri else None
+                    if sp_id and sp_id not in existing_ids and confidence > float(database.get("fuzzy_ratio") or 90):
+                        new_ids.append(sp_id)
+                for i in range(0, len(new_ids), 50):
+                    s.request(s.sp.current_user_saved_tracks_add, new_ids[i:i + 50])
+            return
+
+        if mode == "albums":
+            # Save albums to Spotify library, matched by UPC when available
+            existing_resp = s.request(s.sp.current_user_saved_albums, limit=50)
+            existing_ids = set()
+            limit = 50
+            offset = 0
+            while True:
+                resp = s.request(s.sp.current_user_saved_albums, limit=limit, offset=offset)
+                items = resp.get("items", [])
+                if not items:
+                    break
+                for item in items:
+                    alb = item.get("album")
+                    if alb and alb.get("id"):
+                        existing_ids.add(alb["id"])
+                offset += limit
+                if len(items) < limit:
+                    break
+
+            for playlist in songs_dict:
+                new_ids = []
+                for album_item in playlist.get("songs", []):
+                    # Try UPC first
+                    found_id = None
+                    upc = album_item.get("upc")
+                    if upc:
+                        try:
+                            resp = s.request(s.sp.search, f"upc:{upc}", type="album", limit=1)
+                            items = resp.get("albums", {}).get("items", [])
+                            if items:
+                                found_id = items[0]["id"]
+                        except Exception:
+                            pass
+                    if not found_id:
+                        name = album_item.get("name", "")
+                        artist = album_item.get("artists", [""])[0] if album_item.get("artists") else ""
+                        query = f"album:{name} artist:{artist}" if artist else f"album:{name}"
+                        try:
+                            resp = s.request(s.sp.search, query, type="album", limit=5)
+                            results = resp.get("albums", {}).get("items", [])
+                            for r in results:
+                                if r.get("name", "").lower() == name.lower():
+                                    found_id = r["id"]
+                                    break
+                            if not found_id and results:
+                                found_id = results[0]["id"]
+                        except Exception:
+                            pass
+                    if found_id and found_id not in existing_ids:
+                        new_ids.append(found_id)
+                for i in range(0, len(new_ids), 50):
+                    s.request(s.sp.current_user_saved_albums_add, new_ids[i:i + 50])
+            return
+
+        if mode == "artists":
+            # Follow artists in Spotify
+            for playlist in songs_dict:
+                for artist_item in playlist.get("songs", []):
+                    sp_id = artist_item.get("id", {}).get("spotify")
+                    if not sp_id:
+                        name = artist_item.get("name", "")
+                        try:
+                            resp = s.request(s.sp.search, f"artist:{name}", type="artist", limit=1)
+                            items = resp.get("artists", {}).get("items", [])
+                            if items:
+                                sp_id = items[0]["id"]
+                        except Exception:
+                            pass
+                    if sp_id:
+                        try:
+                            s.request(s.sp.user_follow_artists, [sp_id])
+                        except Exception as e:
+                            log.warning(f"Failed to follow artist {artist_item.get('name')}: {e}")
+            return
 
         # Set the user_id variable
         s.user_id()
@@ -796,6 +997,15 @@ def builder(**kwargs):
 
                     <input class="is-checkradio" type="radio" name="mode" id="saved" value="saved">
                     <label for="saved">Saved Songs</label>
+
+                    <input class="is-checkradio" type="radio" name="mode" id="favorites" value="favorites">
+                    <label for="favorites">Favorites (Liked Tracks)</label>
+
+                    <input class="is-checkradio" type="radio" name="mode" id="albums" value="albums">
+                    <label for="albums">Albums</label>
+
+                    <input class="is-checkradio" type="radio" name="mode" id="artists" value="artists">
+                    <label for="artists">Artists</label>
                 </div>
             </div>
 

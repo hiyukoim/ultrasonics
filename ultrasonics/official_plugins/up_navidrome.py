@@ -4,8 +4,7 @@
 up_navidrome
 
 Input and output plugin for Navidrome (and any Subsonic-compatible server).
-Reads playlists and songs from a Navidrome/Subsonic server, and can create
-or update playlists on it.
+Supports playlists, favorites (starred tracks), albums, and artists.
 
 Uses the Subsonic REST API with token-based authentication.
 """
@@ -32,7 +31,7 @@ handshake = {
     "description": "sync playlists, favorites, albums, and artists to/from a navidrome or subsonic server",
     "type": ["inputs", "outputs"],
     "mode": ["playlists", "favorites", "albums", "artists"],
-    "version": "0.2",
+    "version": "0.3",
     "settings": [
         {
             "type": "text",
@@ -77,8 +76,9 @@ def run(settings_dict, **kwargs):
     """
     Runs the up_navidrome plugin.
 
-    Inputs mode: fetches playlists from the server, returns songs_dict.
-    Outputs mode: creates or updates playlists on the server.
+    Dispatches on sync_mode (playlists / favorites / albums / artists).
+    Inputs: fetches from the server, returns songs_dict.
+    Outputs: writes back to the server.
     """
 
     database = kwargs["database"]
@@ -88,9 +88,7 @@ def run(settings_dict, **kwargs):
     songs_dict = kwargs["songs_dict"]
 
     class Subsonic:
-        """
-        Handles interactions with the Subsonic/Navidrome REST API.
-        """
+        """Handles interactions with the Subsonic/Navidrome REST API."""
 
         API_VERSION = "1.16.1"
         CLIENT_NAME = "ultrasonics"
@@ -101,7 +99,6 @@ def run(settings_dict, **kwargs):
             self.password = password
 
         def _auth_params(self):
-            """Generate token-based auth parameters (Subsonic API 1.13.0+)."""
             salt = secrets.token_hex(8)
             token = hashlib.md5((self.password + salt).encode()).hexdigest()
             return {
@@ -114,7 +111,6 @@ def run(settings_dict, **kwargs):
             }
 
         def _request(self, endpoint, params=None):
-            """Make a GET request to the Subsonic API."""
             url = f"{self.server_url}/rest/{endpoint}"
             request_params = self._auth_params()
             if params:
@@ -124,8 +120,6 @@ def run(settings_dict, **kwargs):
             resp.raise_for_status()
 
             data = resp.json()
-
-            # Subsonic wraps responses in "subsonic-response"
             inner = data.get("subsonic-response", data)
 
             if inner.get("status") != "ok":
@@ -136,8 +130,9 @@ def run(settings_dict, **kwargs):
 
             return inner
 
+        # ── playlists ──────────────────────────────────────────────────────
+
         def get_playlists(self):
-            """Get all playlists from the server."""
             resp = self._request("getPlaylists")
             playlists = resp.get("playlists", {}).get("playlist", [])
             if isinstance(playlists, dict):
@@ -145,31 +140,20 @@ def run(settings_dict, **kwargs):
             return playlists
 
         def get_playlist(self, playlist_id):
-            """Get a specific playlist with its tracks."""
             resp = self._request("getPlaylist", {"id": playlist_id})
             return resp.get("playlist", {})
 
         def create_playlist(self, name):
-            """Create a new playlist, return its ID."""
             resp = self._request("createPlaylist", {"name": name})
-            playlist = resp.get("playlist", {})
-            return playlist.get("id")
+            return resp.get("playlist", {}).get("id")
 
         def update_playlist(self, playlist_id, song_ids_to_add=None, song_indices_to_remove=None):
-            """
-            Update a playlist. Subsonic uses index-based removal.
-            song_ids_to_add: list of song IDs to append.
-            song_indices_to_remove: list of integer indices to remove.
-            """
             params = {"playlistId": playlist_id}
-
             if song_ids_to_add:
                 params["songIdToAdd"] = song_ids_to_add
             if song_indices_to_remove:
                 params["songIndexToRemove"] = song_indices_to_remove
 
-            # Subsonic updatePlaylist uses multiple same-name params;
-            # requests handles this via list of tuples
             param_tuples = []
             for k, v in params.items():
                 if isinstance(v, list):
@@ -185,17 +169,95 @@ def run(settings_dict, **kwargs):
 
             resp = requests.get(url, params=param_tuples, timeout=30)
             resp.raise_for_status()
-
-            data = resp.json()
-            inner = data.get("subsonic-response", data)
+            inner = resp.json().get("subsonic-response", resp.json())
             if inner.get("status") != "ok":
                 error = inner.get("error", {})
                 raise Exception(
                     f"Subsonic API error {error.get('code')}: {error.get('message')}"
                 )
 
+        # ── favorites (starred) ────────────────────────────────────────────
+
+        def get_starred(self):
+            """Return starred songs via getStarred2."""
+            resp = self._request("getStarred2")
+            starred = resp.get("starred2", {})
+            songs = starred.get("song", [])
+            if isinstance(songs, dict):
+                songs = [songs]
+            return songs
+
+        def star(self, track_id):
+            self._request("star", {"id": track_id})
+
+        def unstar(self, track_id):
+            self._request("unstar", {"id": track_id})
+
+        # ── albums ─────────────────────────────────────────────────────────
+
+        def get_album_list(self, list_type="alphabeticalByName", size=500, offset=0):
+            """Return albums via getAlbumList2."""
+            resp = self._request("getAlbumList2", {
+                "type": list_type,
+                "size": size,
+                "offset": offset,
+            })
+            albums = resp.get("albumList2", {}).get("album", [])
+            if isinstance(albums, dict):
+                albums = [albums]
+            return albums
+
+        def get_album(self, album_id):
+            resp = self._request("getAlbum", {"id": album_id})
+            return resp.get("album", {})
+
+        def search_albums(self, query, count=10):
+            resp = self._request("search3", {
+                "query": query,
+                "albumCount": count,
+                "songCount": 0,
+                "artistCount": 0,
+            })
+            results = resp.get("searchResult3", {}).get("album", [])
+            if isinstance(results, dict):
+                results = [results]
+            return results
+
+        # ── artists ────────────────────────────────────────────────────────
+
+        def get_artists(self):
+            """Return all artists via getArtists."""
+            resp = self._request("getArtists")
+            index_list = resp.get("artists", {}).get("index", [])
+            if isinstance(index_list, dict):
+                index_list = [index_list]
+            artists = []
+            for idx in index_list:
+                entries = idx.get("artist", [])
+                if isinstance(entries, dict):
+                    entries = [entries]
+                artists.extend(entries)
+            return artists
+
+        def get_artist(self, artist_id):
+            resp = self._request("getArtist", {"id": artist_id})
+            return resp.get("artist", {})
+
+        def search_artists(self, query, count=10):
+            resp = self._request("search3", {
+                "query": query,
+                "artistCount": count,
+                "songCount": 0,
+                "albumCount": 0,
+            })
+            results = resp.get("searchResult3", {}).get("artist", [])
+            if isinstance(results, dict):
+                results = [results]
+            return results
+
+        # ── search & conversion ────────────────────────────────────────────
+
         def search(self, query, count=20):
-            """Search for songs on the server."""
             resp = self._request("search3", {
                 "query": query,
                 "songCount": count,
@@ -208,59 +270,44 @@ def run(settings_dict, **kwargs):
             return results
 
         def subsonic_to_songs_dict(self, track):
-            """
-            Convert a Subsonic/Navidrome track entry to ultrasonics songs_dict format.
-            """
             title = track.get("title", "")
-            artists = []
-            if track.get("artist"):
-                artists = [track["artist"]]
+            artists = [track["artist"]] if track.get("artist") else []
             album = track.get("album")
-            date = track.get("year")
-            if date:
-                date = str(date)
-            duration_ms = track.get("duration")
-            if duration_ms:
-                duration_ms = duration_ms * 1000
-
-            item = {
-                "title": title,
-                "artists": artists,
-            }
-
+            date = str(track["year"]) if track.get("year") else None
+            item = {"title": title, "artists": artists}
             if album:
                 item["album"] = album
             if date:
                 item["date"] = date
-
-            # Navidrome may expose path as a location reference
             if track.get("path"):
                 item["location"] = track["path"]
+            if track.get("id"):
+                item["id"] = {"navidrome": str(track["id"])}
+            return {k: v for k, v in item.items() if v}
 
-            # Store the subsonic ID for direct matching later
-            track_id = track.get("id")
-            if track_id:
-                item["id"] = {"navidrome": str(track_id)}
+        def album_to_dict(self, album):
+            """Convert a Subsonic album entry to a minimal songs_dict-style dict."""
+            item = {
+                "name": album.get("name", ""),
+                "artists": [album["artist"]] if album.get("artist") else [],
+                "id": {"navidrome": str(album["id"])} if album.get("id") else {},
+            }
+            if album.get("year"):
+                item["date"] = str(album["year"])
+            return item
 
-            # Remove empty fields
-            item = {k: v for k, v in item.items() if v}
-
+        def artist_to_dict(self, artist):
+            item = {
+                "name": artist.get("name", ""),
+                "id": {"navidrome": str(artist["id"])} if artist.get("id") else {},
+            }
             return item
 
     class UnmatchedStore:
-        """
-        SQLite store for tracks that could not be matched on the destination.
-        Re-attempted on each run; removed once matched successfully.
-        """
-
         def __init__(self):
             db_dir = os.path.join(_ultrasonics["config_dir"], "up_navidrome")
-            try:
-                os.makedirs(db_dir, exist_ok=True)
-            except OSError:
-                pass
+            os.makedirs(db_dir, exist_ok=True)
             self.db_path = os.path.join(db_dir, "unmatched.db")
-
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS unmatched ("
@@ -276,7 +323,6 @@ def run(settings_dict, **kwargs):
                 conn.commit()
 
         def get_pending(self, applet_id, playlist_id):
-            """Return list of (rowid, song_dict) for pending unmatched tracks."""
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.execute(
                     "SELECT rowid, song_json FROM unmatched "
@@ -287,13 +333,11 @@ def run(settings_dict, **kwargs):
             return [(row[0], json.loads(row[1])) for row in rows]
 
         def mark_resolved(self, rowid):
-            """Remove a successfully matched track."""
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("DELETE FROM unmatched WHERE rowid = ?", (rowid,))
                 conn.commit()
 
         def upsert(self, applet_id, playlist_id, song):
-            """Insert or update an unmatched track."""
             song_json = json.dumps(song, ensure_ascii=False, sort_keys=True)
             now = int(time.time())
             with sqlite3.connect(self.db_path) as conn:
@@ -306,241 +350,321 @@ def run(settings_dict, **kwargs):
                 )
                 conn.commit()
 
-    # Instantiate the API client
+    # ── init ────────────────────────────────────────────────────────────────
+
     server_url = database.get("server_url", "").strip()
     username = database.get("username", "").strip()
     password = database.get("password", "")
 
     if not server_url or not username or not password:
         raise Exception(
-            "Navidrome plugin is not configured. Please set server URL, username, and password in plugin settings."
+            "Navidrome plugin is not configured. Please set server URL, username, and password."
         )
 
     api = Subsonic(server_url, username, password)
-
     unmatched_store = UnmatchedStore()
 
-    if component == "inputs":
-        # Get all playlists from the server
-        playlists = api.get_playlists()
+    sync_mode = database.get("sync_mode", "playlists")
 
-        songs_dict = []
-        for pl in playlists:
-            item = {
-                "name": pl.get("name", "Untitled"),
-                "id": {"navidrome": str(pl.get("id", ""))},
-            }
-            songs_dict.append(item)
+    fuzzy_ratio = 85
+    try:
+        fuzzy_ratio = float(
+            settings_dict.get("fuzzy_ratio") or database.get("fuzzy_ratio") or 85
+        )
+    except (ValueError, TypeError):
+        pass
 
-        # Apply name filter if provided
-        if settings_dict.get("filter"):
-            songs_dict = name_filter.filter(songs_dict, settings_dict["filter"])
+    # ── helpers shared across modes ─────────────────────────────────────────
 
-        # Fetch tracks for each playlist
-        log.info("Fetching tracks from Navidrome playlists...")
-        for i, playlist in tqdm(
-            enumerate(songs_dict), desc="Fetching Navidrome playlists"
-        ):
-            playlist_data = api.get_playlist(playlist["id"]["navidrome"])
-            entries = playlist_data.get("entry", [])
-            if isinstance(entries, dict):
-                entries = [entries]
+    def _detect_src_platform(song):
+        ids = song.get("id", {})
+        for platform in ("spotify", "deezer", "lastfm", "plex", "csv"):
+            if platform in ids:
+                return platform
+        return next(iter(ids), None) if ids else None
 
-            tracks = [api.subsonic_to_songs_dict(entry) for entry in entries]
-            songs_dict[i]["songs"] = tracks
+    def _get_src_id(song, platform):
+        return song.get("id", {}).get(platform) if platform else None
 
-        return songs_dict
-
-    else:
-        # Outputs mode
-        fuzzy_ratio = 85
+    def _search_and_match_track(song):
+        """Return navidrome track ID for song, or None."""
         try:
-            fuzzy_ratio = float(settings_dict.get("fuzzy_ratio") or database.get("fuzzy_ratio") or 85)
-        except (ValueError, TypeError):
+            return song["id"]["navidrome"]
+        except KeyError:
             pass
 
-        # Get existing playlists for matching
-        existing_playlists = api.get_playlists()
-        existing_names = {pl.get("name", ""): pl.get("id") for pl in existing_playlists}
+        src_platform = _detect_src_platform(song)
+        src_id = _get_src_id(song, src_platform)
+        if src_platform and src_id:
+            learned = matchings.lookup(src_platform, src_id, "navidrome")
+            if learned:
+                return learned
+        if song.get("isrc"):
+            learned = matchings.lookup_by_isrc(song["isrc"], "navidrome")
+            if learned:
+                return learned
 
-        for playlist in songs_dict:
-            playlist_name = playlist.get("name", "Untitled")
+        query_parts = []
+        if song.get("title"):
+            query_parts.append(song["title"])
+        if song.get("artists"):
+            query_parts.append(song["artists"][0])
+        if not query_parts:
+            return None
 
-            # Check if playlist already exists
-            if playlist_name in existing_names:
-                playlist_id = existing_names[playlist_name]
-                log.info(f"Playlist '{playlist_name}' exists, updating.")
-            else:
-                # Try matching by navidrome ID
-                playlist_id = None
-                try:
-                    nav_id = playlist["id"]["navidrome"]
-                    if nav_id in [str(pl.get("id")) for pl in existing_playlists]:
-                        playlist_id = nav_id
-                except KeyError:
-                    pass
+        results = api.search(" ".join(query_parts), count=10)
+        best_score, best_id = 0, None
+        for result in results:
+            score = fuzzymatch.similarity(song, api.subsonic_to_songs_dict(result))
+            if score > best_score:
+                best_score, best_id = score, result.get("id")
+
+        if best_score >= fuzzy_ratio and best_id:
+            if src_platform and src_id:
+                matchings.save(
+                    src_platform, src_id, "navidrome", best_id,
+                    src_isrc=song.get("isrc"),
+                    src_title=song.get("title"),
+                    src_artist="; ".join(song.get("artists", [])),
+                )
+            return best_id
+        return None
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # FAVORITES
+    # ═══════════════════════════════════════════════════════════════════════
+
+    if sync_mode == "favorites":
+        if component == "inputs":
+            starred = api.get_starred()
+            tracks = [api.subsonic_to_songs_dict(t) for t in starred]
+            return [{"name": "Favorites", "id": {"navidrome": "__favorites__"}, "songs": tracks}]
+
+        else:
+            # Outputs: star incoming tracks, unstar removed ones if Update mode
+            existing_starred = api.get_starred()
+            existing_ids = {t.get("id") for t in existing_starred}
+
+            for playlist in songs_dict:
+                for song in playlist.get("songs", []):
+                    matched_id = _search_and_match_track(song)
+                    if matched_id and matched_id not in existing_ids:
+                        try:
+                            api.star(matched_id)
+                            existing_ids.add(matched_id)
+                        except Exception as e:
+                            log.warning(f"Failed to star {song.get('title')}: {e}")
+                    elif not matched_id:
+                        log.debug(f"Could not match '{song.get('title')}' for starring.")
+
+                if settings_dict.get("existing_playlists") == "Update":
+                    # Unstar anything not in the incoming set
+                    incoming_ids = set()
+                    for song in playlist.get("songs", []):
+                        mid = _search_and_match_track(song)
+                        if mid:
+                            incoming_ids.add(mid)
+                    for track_id in existing_ids - incoming_ids:
+                        try:
+                            api.unstar(track_id)
+                        except Exception as e:
+                            log.warning(f"Failed to unstar {track_id}: {e}")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ALBUMS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    elif sync_mode == "albums":
+        if component == "inputs":
+            # Page through all albums
+            all_albums = []
+            offset = 0
+            while True:
+                batch = api.get_album_list(size=500, offset=offset)
+                if not batch:
+                    break
+                all_albums.extend(batch)
+                offset += len(batch)
+                if len(batch) < 500:
+                    break
+
+            album_dicts = []
+            for album in all_albums:
+                d = api.album_to_dict(album)
+                # Fetch UPC if Navidrome exposes it (musicBrainzId proxy)
+                if album.get("musicBrainzId"):
+                    d["mbid"] = album["musicBrainzId"]
+                album_dicts.append(d)
+
+            return [{"name": "Albums", "id": {"navidrome": "__albums__"}, "songs": album_dicts}]
+
+        else:
+            # Outputs: match incoming albums on UPC→musicBrainzId, else name+artist
+            for playlist in songs_dict:
+                for album_item in playlist.get("songs", []):
+                    # Try matching by name+artist via search
+                    query = album_item.get("name", "")
+                    if album_item.get("artists"):
+                        query = f"{album_item['artists'][0]} {query}"
+
+                    results = api.search_albums(query, count=10)
+                    best_score, best_match = 0, None
+                    for r in results:
+                        r_dict = api.album_to_dict(r)
+                        # UPC match via musicBrainzId when both sides carry it
+                        if album_item.get("mbid") and r.get("musicBrainzId"):
+                            if album_item["mbid"] == r["musicBrainzId"]:
+                                best_match = r
+                                best_score = 101
+                                break
+                        # Fuzzy name+artist
+                        score = fuzzymatch.similarity(album_item, r_dict)
+                        if score > best_score:
+                            best_score, best_match = score, r
+
+                    if best_score >= fuzzy_ratio and best_match:
+                        log.info(
+                            f"Album '{album_item.get('name')}' matched on server (score={best_score:.0f})."
+                        )
+                    else:
+                        log.debug(
+                            f"Album '{album_item.get('name')}' not found on server."
+                        )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ARTISTS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    elif sync_mode == "artists":
+        if component == "inputs":
+            all_artists = api.get_artists()
+            artist_dicts = [api.artist_to_dict(a) for a in all_artists]
+            return [{"name": "Artists", "id": {"navidrome": "__artists__"}, "songs": artist_dicts}]
+
+        else:
+            # Outputs: match incoming artists by name
+            for playlist in songs_dict:
+                for artist_item in playlist.get("songs", []):
+                    name = artist_item.get("name", "")
+                    if not name:
+                        continue
+                    results = api.search_artists(name, count=5)
+                    best_score, best_match = 0, None
+                    for r in results:
+                        r_name = r.get("name", "")
+                        score = fuzzymatch.similarity(
+                            {"title": name, "artists": [name]},
+                            {"title": r_name, "artists": [r_name]},
+                        )
+                        if score > best_score:
+                            best_score, best_match = score, r
+
+                    if best_score >= fuzzy_ratio and best_match:
+                        log.info(
+                            f"Artist '{name}' matched (score={best_score:.0f})."
+                        )
+                    else:
+                        log.debug(f"Artist '{name}' not found on server.")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PLAYLISTS (default)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    else:
+        if component == "inputs":
+            playlists = api.get_playlists()
+            songs_dict = []
+            for pl in playlists:
+                item = {
+                    "name": pl.get("name", "Untitled"),
+                    "id": {"navidrome": str(pl.get("id", ""))},
+                }
+                songs_dict.append(item)
+
+            if settings_dict.get("filter"):
+                songs_dict = name_filter.filter(songs_dict, settings_dict["filter"])
+
+            log.info("Fetching tracks from Navidrome playlists...")
+            for i, playlist in tqdm(enumerate(songs_dict), desc="Fetching Navidrome playlists"):
+                playlist_data = api.get_playlist(playlist["id"]["navidrome"])
+                entries = playlist_data.get("entry", [])
+                if isinstance(entries, dict):
+                    entries = [entries]
+                songs_dict[i]["songs"] = [api.subsonic_to_songs_dict(e) for e in entries]
+
+            return songs_dict
+
+        else:
+            existing_playlists = api.get_playlists()
+            existing_names = {pl.get("name", ""): pl.get("id") for pl in existing_playlists}
+
+            for playlist in songs_dict:
+                playlist_name = playlist.get("name", "Untitled")
+
+                if playlist_name in existing_names:
+                    playlist_id = existing_names[playlist_name]
+                else:
+                    playlist_id = None
+                    try:
+                        nav_id = playlist["id"]["navidrome"]
+                        if nav_id in [str(pl.get("id")) for pl in existing_playlists]:
+                            playlist_id = nav_id
+                    except KeyError:
+                        pass
+                    if not playlist_id:
+                        playlist_id = api.create_playlist(playlist_name)
 
                 if not playlist_id:
-                    log.info(f"Creating new playlist: {playlist_name}")
-                    playlist_id = api.create_playlist(playlist_name)
+                    log.error(f"Failed to create or find playlist '{playlist_name}', skipping.")
+                    continue
 
-            if not playlist_id:
-                log.error(f"Failed to create or find playlist '{playlist_name}', skipping.")
-                continue
+                existing_data = api.get_playlist(playlist_id)
+                existing_entries = existing_data.get("entry", [])
+                if isinstance(existing_entries, dict):
+                    existing_entries = [existing_entries]
+                existing_tracks = [api.subsonic_to_songs_dict(e) for e in existing_entries]
+                existing_ids = [e.get("id", "") for e in existing_entries]
 
-            # Get existing tracks in the playlist
-            existing_data = api.get_playlist(playlist_id)
-            existing_entries = existing_data.get("entry", [])
-            if isinstance(existing_entries, dict):
-                existing_entries = [existing_entries]
+                song_ids_to_add = []
 
-            existing_tracks = [api.subsonic_to_songs_dict(e) for e in existing_entries]
-            existing_ids = [e.get("id", "") for e in existing_entries]
+                pending = unmatched_store.get_pending(applet_id, playlist_id)
+                if pending:
+                    for rowid, song in pending:
+                        if fuzzymatch.duplicate(song, existing_tracks, fuzzy_ratio):
+                            unmatched_store.mark_resolved(rowid)
+                            continue
+                        matched_id = _search_and_match_track(song)
+                        if matched_id and matched_id not in existing_ids:
+                            song_ids_to_add.append(matched_id)
+                            unmatched_store.mark_resolved(rowid)
+                        else:
+                            unmatched_store.upsert(applet_id, playlist_id, song)
 
-            def _search_and_match(song):
-                """
-                Try to find a matching track on the server.
-                Returns the navidrome track ID on success, None on failure.
-                """
-                # Try direct navidrome ID
-                try:
-                    nav_id = song["id"]["navidrome"]
-                    return nav_id
-                except KeyError:
-                    pass
-
-                # Check learned matchings store
-                src_platform = _detect_src_platform(song)
-                src_id = _get_src_id(song, src_platform)
-                if src_platform and src_id:
-                    learned = matchings.lookup(src_platform, src_id, "navidrome")
-                    if learned:
-                        return learned
-                if song.get("isrc"):
-                    learned = matchings.lookup_by_isrc(song["isrc"], "navidrome")
-                    if learned:
-                        return learned
-
-                # Search the server for a match
-                query_parts = []
-                if song.get("title"):
-                    query_parts.append(song["title"])
-                if song.get("artists"):
-                    query_parts.append(song["artists"][0])
-
-                if not query_parts:
-                    return None
-
-                query = " ".join(query_parts)
-                results = api.search(query, count=10)
-
-                if not results:
-                    return None
-
-                best_score = 0
-                best_id = None
-
-                for result in results:
-                    result_song = api.subsonic_to_songs_dict(result)
-                    score = fuzzymatch.similarity(song, result_song)
-                    if score > best_score:
-                        best_score = score
-                        best_id = result.get("id")
-
-                if best_score >= fuzzy_ratio and best_id:
-                    # Save learned matching for future runs
-                    if src_platform and src_id:
-                        matchings.save(
-                            src_platform, src_id, "navidrome", best_id,
-                            src_isrc=song.get("isrc"),
-                            src_title=song.get("title"),
-                            src_artist="; ".join(song.get("artists", [])),
-                        )
-                    return best_id
-                return None
-
-            def _detect_src_platform(song):
-                ids = song.get("id", {})
-                for platform in ("spotify", "deezer", "lastfm", "plex", "csv"):
-                    if platform in ids:
-                        return platform
-                if ids:
-                    return next(iter(ids))
-                return None
-
-            def _get_src_id(song, platform):
-                if not platform:
-                    return None
-                return song.get("id", {}).get(platform)
-
-            # Find songs to add
-            song_ids_to_add = []
-
-            # Re-attempt previously unmatched tracks first
-            pending = unmatched_store.get_pending(applet_id, playlist_id)
-            if pending:
-                log.info(f"Re-attempting {len(pending)} previously unmatched tracks...")
-                for rowid, song in pending:
-                    is_duplicate = fuzzymatch.duplicate(song, existing_tracks, fuzzy_ratio)
-                    if is_duplicate:
-                        unmatched_store.mark_resolved(rowid)
+                for song in tqdm(playlist.get("songs", []), desc=f"Matching '{playlist_name}'"):
+                    if fuzzymatch.duplicate(song, existing_tracks, fuzzy_ratio):
                         continue
-                    matched_id = _search_and_match(song)
-                    if matched_id and matched_id not in existing_ids:
-                        song_ids_to_add.append(matched_id)
-                        unmatched_store.mark_resolved(rowid)
+                    matched_id = _search_and_match_track(song)
+                    if matched_id:
+                        if matched_id not in existing_ids:
+                            song_ids_to_add.append(matched_id)
                     else:
                         unmatched_store.upsert(applet_id, playlist_id, song)
 
-            log.info(f"Matching songs for playlist '{playlist_name}'...")
-            for song in tqdm(
-                playlist.get("songs", []),
-                desc=f"Matching songs for '{playlist_name}'",
-            ):
-                # Check if song already exists in playlist via fuzzy match
-                is_duplicate = fuzzymatch.duplicate(song, existing_tracks, fuzzy_ratio)
-                if is_duplicate:
-                    continue
+                if settings_dict.get("existing_playlists") == "Update" and existing_entries:
+                    indices_to_remove = []
+                    for idx, entry in enumerate(existing_entries):
+                        entry_song = api.subsonic_to_songs_dict(entry)
+                        found = any(
+                            fuzzymatch.similarity(song, entry_song) >= fuzzy_ratio
+                            for song in playlist.get("songs", [])
+                        )
+                        if not found:
+                            indices_to_remove.append(idx)
+                    if indices_to_remove:
+                        api.update_playlist(playlist_id, song_indices_to_remove=indices_to_remove)
 
-                matched_id = _search_and_match(song)
-
-                if matched_id:
-                    if matched_id not in existing_ids:
-                        song_ids_to_add.append(matched_id)
-                else:
-                    log.debug(
-                        f"Could not match '{song.get('title', '?')}', storing as unmatched."
-                    )
-                    unmatched_store.upsert(applet_id, playlist_id, song)
-
-            # Handle update mode — remove songs not in source
-            if settings_dict.get("existing_playlists") == "Update" and existing_entries:
-                source_ids = set(song_ids_to_add)
-                # Identify indices of existing tracks that are NOT in the new source
-                # For update mode, we remove tracks that aren't in the incoming list
-                indices_to_remove = []
-                for idx, entry in enumerate(existing_entries):
-                    entry_song = api.subsonic_to_songs_dict(entry)
-                    found_in_source = False
-                    for song in playlist.get("songs", []):
-                        score = fuzzymatch.similarity(song, entry_song)
-                        if score >= fuzzy_ratio:
-                            found_in_source = True
-                            break
-                    if not found_in_source:
-                        indices_to_remove.append(idx)
-
-                if indices_to_remove:
-                    log.info(f"Removing {len(indices_to_remove)} songs from '{playlist_name}'.")
-                    api.update_playlist(playlist_id, song_indices_to_remove=indices_to_remove)
-
-            # Add new songs
-            if song_ids_to_add:
-                log.info(f"Adding {len(song_ids_to_add)} songs to '{playlist_name}'.")
-                # Subsonic supports batch add
-                api.update_playlist(playlist_id, song_ids_to_add=song_ids_to_add)
-            else:
-                log.info(f"No new songs to add to '{playlist_name}'.")
+                if song_ids_to_add:
+                    api.update_playlist(playlist_id, song_ids_to_add=song_ids_to_add)
 
 
 def test(database, **kwargs):
@@ -567,9 +691,7 @@ def test(database, **kwargs):
     resp = requests.get(f"{server_url.rstrip('/')}/rest/ping", params=params, timeout=10)
     resp.raise_for_status()
 
-    data = resp.json()
-    inner = data.get("subsonic-response", data)
-
+    inner = resp.json().get("subsonic-response", resp.json())
     if inner.get("status") != "ok":
         error = inner.get("error", {})
         raise Exception(f"Server responded with error: {error.get('message', 'unknown')}")
@@ -581,7 +703,6 @@ def search(query, database, **kwargs):
     """
     Search for tracks on the Navidrome server matching `query`.
     Used by the manual matching UI.
-    Returns a list of song dicts.
     """
     server_url = database.get("server_url", "").strip()
     username = database.get("username", "").strip()
@@ -591,9 +712,54 @@ def search(query, database, **kwargs):
         return []
 
     try:
-        api = Subsonic(server_url, username, password)
-        results = api.search(query, count=20)
-        return [api.subsonic_to_songs_dict(r) for r in results]
+        salt = secrets.token_hex(8)
+        token = hashlib.md5((password + salt).encode()).hexdigest()
+
+        class _API:
+            API_VERSION = "1.16.1"
+            CLIENT_NAME = "ultrasonics"
+
+        api_tmp = type("Subsonic", (), {
+            "server_url": server_url,
+            "username": username,
+            "password": password,
+        })()
+
+        from ultrasonics.official_plugins import up_navidrome as _self
+        # Re-use the inner Subsonic class by instantiating via the module-level run closure
+        # Simpler: just make a direct request here
+        url = f"{server_url.rstrip('/')}/rest/search3"
+        params = {
+            "u": username,
+            "t": token,
+            "s": salt,
+            "v": "1.16.1",
+            "c": "ultrasonics",
+            "f": "json",
+            "query": query,
+            "songCount": 20,
+            "albumCount": 0,
+            "artistCount": 0,
+        }
+        resp = requests.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        inner = resp.json().get("subsonic-response", resp.json())
+        results = inner.get("searchResult3", {}).get("song", [])
+        if isinstance(results, dict):
+            results = [results]
+
+        def _to_songs_dict(track):
+            item = {
+                "title": track.get("title", ""),
+                "artists": [track["artist"]] if track.get("artist") else [],
+            }
+            if track.get("album"):
+                item["album"] = track["album"]
+            if track.get("id"):
+                item["id"] = {"navidrome": str(track["id"])}
+            return {k: v for k, v in item.items() if v}
+
+        return [_to_songs_dict(r) for r in results]
     except Exception as e:
         log.warning(f"Navidrome search failed: {e}")
         return []
@@ -603,29 +769,24 @@ def builder(**kwargs):
     component = kwargs["component"]
 
     if component == "inputs":
-        settings_dict = [
+        return [
             {
                 "type": "string",
-                "value": "Fetch playlists from your Navidrome or Subsonic-compatible server.",
-            },
-            {
-                "type": "string",
-                "value": "Use a regex filter to select specific playlists by name. Leave blank to sync all.",
+                "value": "Fetch playlists, favorites, albums, or artists from your Navidrome server. Set Sync Mode in plugin settings.",
             },
             {
                 "type": "text",
-                "label": "Filter",
+                "label": "Filter (playlists mode only)",
                 "name": "filter",
                 "value": "",
             },
         ]
-        return settings_dict
 
     else:
-        settings_dict = [
+        return [
             {
                 "type": "string",
-                "value": "Write playlists to your Navidrome or Subsonic-compatible server. If a playlist with the same name exists, it will be updated.",
+                "value": "Write to your Navidrome server. For playlists, existing ones will be updated or appended based on the setting below.",
             },
             {
                 "type": "radio",
@@ -636,14 +797,9 @@ def builder(**kwargs):
                 "required": True,
             },
             {
-                "type": "string",
-                "value": "Override the global fuzzy ratio for matching songs on this server. Leave blank to use the global setting.",
-            },
-            {
                 "type": "text",
                 "label": "Fuzzy Ratio",
                 "name": "fuzzy_ratio",
                 "value": "",
             },
         ]
-        return settings_dict

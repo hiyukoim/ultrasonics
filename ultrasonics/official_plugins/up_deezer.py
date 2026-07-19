@@ -25,13 +25,16 @@ log = logs.create_log(__name__)
 
 handshake = {
     "name": "deezer",
-    "description": "sync your playlists to and from deezer",
+    "description": "sync your playlists, favorites, albums, and artists to and from deezer",
     "type": [
         "inputs",
         "outputs"
     ],
     "mode": [
-        "playlists"
+        "playlists",
+        "favorites",
+        "albums",
+        "artists"
     ],
     "version": "0.4",
     "settings": [
@@ -372,37 +375,203 @@ def run(settings_dict, **kwargs):
     dz = Deezer()
     dz.token = re.match("access_token=([\w]+)&", database["auth"]).groups()[0]
 
+    def _dz_album_to_dict(album):
+        upc = album.get("upc") or album.get("UPC")
+        artists = [a["name"] for a in album.get("artist", {}) if isinstance(a, dict)] if isinstance(album.get("artist"), list) else [album["artist"]["name"]] if album.get("artist") else []
+        item = {
+            "name": album.get("title", ""),
+            "artists": artists,
+            "id": {"deezer": str(album["id"])},
+        }
+        if upc:
+            item["upc"] = upc
+        if album.get("release_date"):
+            item["date"] = album["release_date"]
+        return {k: v for k, v in item.items() if v}
+
+    def _dz_artist_to_dict(artist):
+        item = {
+            "name": artist.get("name", ""),
+            "id": {"deezer": str(artist["id"])},
+        }
+        return {k: v for k, v in item.items() if v}
+
+    mode = settings_dict.get("mode", "playlists")
+
     if component == "inputs":
-        # 1. Get a list of users playlists
-        playlists = dz.list_playlists()
+        if mode == "favorites":
+            # GET /user/me/tracks — liked tracks
+            all_tracks = []
+            url = "https://api.deezer.com/user/me/tracks"
+            params = {"access_token": dz.token, "limit": 50, "index": 0}
+            while True:
+                resp = dz.api(url, params=params)
+                items = resp.get("data", [])
+                if not items:
+                    break
+                all_tracks.extend([dz.deezer_to_songs_dict(t) for t in items])
+                params["index"] += len(items)
+                if len(items) < 50:
+                    break
+            return [{"name": "Favorites", "id": {"deezer": "__favorites__"}, "songs": all_tracks}]
 
-        songs_dict = []
+        elif mode == "albums":
+            all_albums = []
+            url = "https://api.deezer.com/user/me/albums"
+            params = {"access_token": dz.token, "limit": 50, "index": 0}
+            while True:
+                resp = dz.api(url, params=params)
+                items = resp.get("data", [])
+                if not items:
+                    break
+                for alb in items:
+                    # Fetch full album for UPC
+                    try:
+                        full = dz.api(f"https://api.deezer.com/album/{alb['id']}", params={"access_token": dz.token})
+                        all_albums.append(_dz_album_to_dict(full))
+                    except Exception:
+                        all_albums.append(_dz_album_to_dict(alb))
+                params["index"] += len(items)
+                if len(items) < 50:
+                    break
+            return [{"name": "Albums", "id": {"deezer": "__albums__"}, "songs": all_albums}]
 
-        for playlist in playlists:
-            item = {
-                "name": playlist["title"],
-                "id": {
-                    "deezer": playlist["id"]
+        elif mode == "artists":
+            all_artists = []
+            url = "https://api.deezer.com/user/me/artists"
+            params = {"access_token": dz.token, "limit": 50, "index": 0}
+            while True:
+                resp = dz.api(url, params=params)
+                items = resp.get("data", [])
+                if not items:
+                    break
+                all_artists.extend([_dz_artist_to_dict(a) for a in items])
+                params["index"] += len(items)
+                if len(items) < 50:
+                    break
+            return [{"name": "Artists", "id": {"deezer": "__artists__"}, "songs": all_artists}]
+
+        else:
+            # playlists (default)
+            playlists = dz.list_playlists()
+
+            songs_dict = []
+
+            for playlist in playlists:
+                item = {
+                    "name": playlist["title"],
+                    "id": {
+                        "deezer": playlist["id"]
+                    }
                 }
-            }
 
-            songs_dict.append(item)
+                songs_dict.append(item)
 
-        # 2. Filter playlist titles
-        songs_dict = name_filter.filter(songs_dict, settings_dict["filter"])
+            # 2. Filter playlist titles
+            songs_dict = name_filter.filter(songs_dict, settings_dict["filter"])
 
-        # 3. Fetch songs from each playlist, build songs_dict
-        log.info("Building songs_dict for playlists...")
-        for i, playlist in tqdm(enumerate(songs_dict), desc="Building songs_dict"):
-            tracks = dz.playlist_tracks(playlist["id"]["deezer"])
+            # 3. Fetch songs from each playlist, build songs_dict
+            log.info("Building songs_dict for playlists...")
+            for i, playlist in tqdm(enumerate(songs_dict), desc="Building songs_dict"):
+                tracks = dz.playlist_tracks(playlist["id"]["deezer"])
 
-            songs_dict[i]["songs"] = tracks
+                songs_dict[i]["songs"] = tracks
 
-        return songs_dict
+            return songs_dict
 
     else:
         "Outputs mode"
 
+        if mode == "favorites":
+            # Add liked tracks — POST /user/me/tracks?track_id=...
+            for playlist in songs_dict:
+                for song in playlist.get("songs", []):
+                    dz_id = song.get("id", {}).get("deezer")
+                    if not dz_id:
+                        result = dz.search(song)
+                        if result and len(result) >= 2 and result[1] is not None:
+                            dz_id = result[0]
+                    if dz_id:
+                        try:
+                            dz.api(
+                                "https://api.deezer.com/user/me/tracks",
+                                method="POST",
+                                data={"access_token": dz.token, "track_id": dz_id},
+                            )
+                        except Exception as e:
+                            log.warning(f"Failed to favorite {song.get('title')}: {e}")
+            return
+
+        if mode == "albums":
+            # Save albums — POST /user/me/albums?album_id=...
+            for playlist in songs_dict:
+                for album_item in playlist.get("songs", []):
+                    dz_id = album_item.get("id", {}).get("deezer")
+                    if not dz_id:
+                        upc = album_item.get("upc")
+                        if upc:
+                            try:
+                                resp = dz.api(
+                                    f"https://api.deezer.com/album/upc:{upc}",
+                                    params={"access_token": dz.token},
+                                )
+                                dz_id = str(resp.get("id", ""))
+                            except Exception:
+                                pass
+                        if not dz_id:
+                            name = album_item.get("name", "")
+                            artist = album_item.get("artists", [""])[0] if album_item.get("artists") else ""
+                            query = f"{artist} {name}".strip()
+                            try:
+                                resp = dz.api(
+                                    "https://api.deezer.com/search/album",
+                                    params={"q": query, "access_token": dz.token, "limit": 5},
+                                )
+                                results = resp.get("data", [])
+                                if results:
+                                    dz_id = str(results[0]["id"])
+                            except Exception:
+                                pass
+                    if dz_id:
+                        try:
+                            dz.api(
+                                "https://api.deezer.com/user/me/albums",
+                                method="POST",
+                                data={"access_token": dz.token, "album_id": dz_id},
+                            )
+                        except Exception as e:
+                            log.warning(f"Failed to save album {album_item.get('name')}: {e}")
+            return
+
+        if mode == "artists":
+            # Follow artists — POST /user/me/artists?artist_id=...
+            for playlist in songs_dict:
+                for artist_item in playlist.get("songs", []):
+                    dz_id = artist_item.get("id", {}).get("deezer")
+                    if not dz_id:
+                        name = artist_item.get("name", "")
+                        try:
+                            resp = dz.api(
+                                "https://api.deezer.com/search/artist",
+                                params={"q": name, "access_token": dz.token, "limit": 1},
+                            )
+                            results = resp.get("data", [])
+                            if results:
+                                dz_id = str(results[0]["id"])
+                        except Exception:
+                            pass
+                    if dz_id:
+                        try:
+                            dz.api(
+                                "https://api.deezer.com/user/me/artists",
+                                method="POST",
+                                data={"access_token": dz.token, "artist_id": dz_id},
+                            )
+                        except Exception as e:
+                            log.warning(f"Failed to follow artist {artist_item.get('name')}: {e}")
+            return
+
+        # playlists (default)
         # Get a list of current user playlists
         current_playlists = dz.list_playlists()
 
