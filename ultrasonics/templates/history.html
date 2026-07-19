@@ -45,6 +45,9 @@
                         <th>Applet</th>
                         <th>Started</th>
                         <th>Duration</th>
+                        <th>Playlists</th>
+                        <th>Tracks</th>
+                        <th>Unmatched</th>
                         <th>Result</th>
                         <th>Summary</th>
                     </tr>
@@ -55,6 +58,9 @@
                         <td><code>{{ item.applet_id[:8] }}</code></td>
                         <td>{{ item.started_fmt }}</td>
                         <td>{{ item.duration }}</td>
+                        <td>{{ item.n_playlists or 0 }}</td>
+                        <td>{{ item.n_tracks or 0 }}</td>
+                        <td>{{ item.n_unmatched or 0 }}</td>
                         <td>
                             {% if item.success == 1 %}
                             <span class="tag is-success">success</span>

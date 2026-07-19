@@ -80,6 +80,56 @@ class Core:
             "label": "Notification Webhook URL (optional)",
             "name": "notification_url",
             "value": ""
+        },
+        {
+            "type": "string",
+            "value": "Notification events to subscribe to (comma-separated: BATCH_END, TASK_ERROR, PLATFORM_DISCONNECTED)"
+        },
+        {
+            "type": "text",
+            "label": "Notification Events",
+            "name": "notifications",
+            "value": "BATCH_END,TASK_ERROR,PLATFORM_DISCONNECTED"
+        },
+        {
+            "type": "string",
+            "value": "Email notifications via SMTP. Leave SMTP Host blank to disable."
+        },
+        {
+            "type": "text",
+            "label": "SMTP Host",
+            "name": "smtp_host",
+            "value": ""
+        },
+        {
+            "type": "text",
+            "label": "SMTP Port (587=STARTTLS, 465=SSL)",
+            "name": "smtp_port",
+            "value": "587"
+        },
+        {
+            "type": "text",
+            "label": "SMTP Username",
+            "name": "smtp_user",
+            "value": ""
+        },
+        {
+            "type": "text",
+            "label": "SMTP Password",
+            "name": "smtp_pass",
+            "value": ""
+        },
+        {
+            "type": "text",
+            "label": "From Address",
+            "name": "smtp_from",
+            "value": ""
+        },
+        {
+            "type": "text",
+            "label": "To Address(es) (comma-separated)",
+            "name": "smtp_to",
+            "value": ""
         }
     ]
 

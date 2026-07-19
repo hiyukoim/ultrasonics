@@ -10,7 +10,7 @@ XDGFX, 2020
 import copy
 import os
 
-from flask import Flask, redirect, render_template, request
+from flask import Flask, jsonify, redirect, render_template, request
 from flask_socketio import SocketIO, emit, send
 
 from ultrasonics import database, logs, plugins
@@ -305,6 +305,55 @@ def html_unmatched():
         items=items,
         matchings_count=matchings.count(),
     )
+
+
+@app.route('/unmatched/search', methods=['GET'])
+def html_unmatched_search():
+    import importlib
+    import json as _json
+    db_path = request.args.get('db_path', '')
+    query = request.args.get('query', '').strip()
+
+    results = []
+    error = None
+
+    if query and db_path:
+        plugin_name = os.path.basename(os.path.dirname(db_path))
+        try:
+            mod = importlib.import_module(f"ultrasonics.official_plugins.{plugin_name}")
+            if hasattr(mod, 'search'):
+                db = database.Plugin()
+                db.load(plugin_name)
+                results = mod.search(query, db)
+        except Exception as e:
+            error = str(e)
+            log.warning(f"Manual search failed for {plugin_name}: {e}")
+
+    return jsonify({'results': results, 'error': error})
+
+
+@app.route('/unmatched/match', methods=['POST'])
+def html_unmatched_match():
+    db_path = request.form.get('db_path', '')
+    rowid = request.form.get('rowid', '')
+    src_platform = request.form.get('src_platform', '')
+    src_id = request.form.get('src_id', '')
+    src_isrc = request.form.get('src_isrc', '')
+    src_title = request.form.get('src_title', '')
+    src_artist = request.form.get('src_artist', '')
+    dst_platform = request.form.get('dst_platform', '')
+    dst_id = request.form.get('dst_id', '')
+
+    if all([db_path, rowid, src_platform, src_id, dst_platform, dst_id]):
+        matchings.save(
+            src_platform, src_id, dst_platform, dst_id,
+            src_isrc=src_isrc or None,
+            src_title=src_title or None,
+            src_artist=src_artist or None,
+        )
+        unmatched.resolve(db_path, int(rowid))
+
+    return redirect('/unmatched')
 
 
 @app.route('/matchings', methods=['GET', 'POST'])

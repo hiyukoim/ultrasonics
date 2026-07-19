@@ -4,16 +4,18 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-
     <title>ultrasonics - unmatched tracks</title>
-    <meta name="description" content="manage unmatched tracks">
-
     <link rel="shortcut icon" href="/static/images/favicon.ico">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.0/css/bulma.min.css">
     <link rel="stylesheet" type="text/css" href="https://unpkg.com/bulma-prefers-dark">
     <link rel="stylesheet"
         href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&family=Roboto+Mono:wght@400;700&display=swap">
     <link rel="stylesheet" href="/static/css/custom.css">
+    <style>
+        .search-results { margin-top: 0.5rem; }
+        .search-result-item { cursor: pointer; padding: 0.4rem 0.6rem; border-radius: 4px; }
+        .search-result-item:hover { background: rgba(0,0,0,0.08); }
+    </style>
 </head>
 
 <body class="has-background-animated">
@@ -35,45 +37,47 @@
             </div>
 
             {% if items %}
-            <table class="table is-fullwidth is-hoverable is-striped">
-                <thead>
-                    <tr>
-                        <th>Track</th>
-                        <th>Artist</th>
-                        <th>Plugin</th>
-                        <th>Playlist</th>
-                        <th>First Seen</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for item in items %}
-                    <tr>
-                        <td>{{ item.song.get('title', '?') }}</td>
-                        <td>{{ item.song.get('artists', ['?']) | join('; ') }}</td>
-                        <td><span class="tag is-info is-light">{{ item.plugin }}</span></td>
-                        <td>{{ item.playlist_id }}</td>
-                        <td>{{ item.first_seen_fmt }}</td>
-                        <td>
-                            <form method="POST" action="/unmatched" style="display:inline">
-                                <input type="hidden" name="action" value="dismiss">
-                                <input type="hidden" name="db_path" value="{{ item.db_path }}">
-                                <input type="hidden" name="rowid" value="{{ item.rowid }}">
-                                <button class="button is-small is-warning" type="submit"
-                                    title="Dismiss (won't retry)">&#10005;</button>
-                            </form>
-                            <form method="POST" action="/unmatched" style="display:inline">
-                                <input type="hidden" name="action" value="resolve">
-                                <input type="hidden" name="db_path" value="{{ item.db_path }}">
-                                <input type="hidden" name="rowid" value="{{ item.rowid }}">
-                                <button class="button is-small is-success" type="submit"
-                                    title="Mark resolved">&#10003;</button>
-                            </form>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+            {% for item in items %}
+            <div class="box" id="row-{{ loop.index }}">
+                <div class="columns is-vcentered">
+                    <div class="column">
+                        <strong>{{ item.song.get('title', '?') }}</strong>
+                        <span class="has-text-grey"> — {{ item.song.get('artists', ['?']) | join('; ') }}</span>
+                        <br>
+                        <small class="has-text-grey">
+                            <span class="tag is-info is-light is-small">{{ item.plugin }}</span>
+                            &nbsp;{{ item.playlist_id }}&nbsp;&middot;&nbsp;since {{ item.first_seen_fmt }}
+                        </small>
+                    </div>
+                    <div class="column is-narrow">
+                        <form method="POST" action="/unmatched" style="display:inline">
+                            <input type="hidden" name="action" value="dismiss">
+                            <input type="hidden" name="db_path" value="{{ item.db_path }}">
+                            <input type="hidden" name="rowid" value="{{ item.rowid }}">
+                            <button class="button is-small is-warning" type="submit" title="Dismiss">&#10005;</button>
+                        </form>
+                    </div>
+                </div>
+
+                <div class="field has-addons">
+                    <div class="control is-expanded">
+                        <input class="input is-small" type="text"
+                            id="q-{{ loop.index }}"
+                            placeholder="search on {{ item.plugin }}…"
+                            value="{{ item.song.get('title', '') }} {{ item.song.get('artists', [''])[0] }}">
+                    </div>
+                    <div class="control">
+                        <button class="button is-small is-link"
+                            onclick="doSearch({{ loop.index }}, '{{ item.db_path | replace("'", "\\'") }}', '{{ item.rowid }}', '{{ item.song | tojson | replace("'", "\\'") | replace('"', '&quot;') }}')">
+                            search
+                        </button>
+                    </div>
+                </div>
+
+                <div id="results-{{ loop.index }}" class="search-results"></div>
+            </div>
+            {% endfor %}
+
             {% else %}
             <div class="notification is-success is-light has-text-centered">
                 No unmatched tracks! All songs have been matched successfully.
@@ -88,6 +92,61 @@
             </p>
         </div>
     </div>
+
+    <script>
+    function doSearch(idx, dbPath, rowid, songJson) {
+        const query = document.getElementById('q-' + idx).value.trim();
+        if (!query) return;
+
+        const resultsDiv = document.getElementById('results-' + idx);
+        resultsDiv.innerHTML = '<p class="is-size-7 has-text-grey">searching...</p>';
+
+        const url = '/unmatched/search?db_path=' + encodeURIComponent(dbPath) + '&query=' + encodeURIComponent(query);
+        fetch(url)
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) {
+                    resultsDiv.innerHTML = '<p class="is-size-7 has-text-danger">' + data.error + '</p>';
+                    return;
+                }
+                if (!data.results || data.results.length === 0) {
+                    resultsDiv.innerHTML = '<p class="is-size-7 has-text-grey">no results found</p>';
+                    return;
+                }
+                let song;
+                try { song = JSON.parse(decodeURIComponent(songJson.replace(/&quot;/g, '"'))); } catch(e) { song = {}; }
+                const srcPlatform = Object.keys(song.id || {})[0] || '';
+                const srcId = (song.id || {})[srcPlatform] || '';
+
+                let html = '<div class="content is-small">';
+                data.results.forEach(function(r) {
+                    const dstId = (r.id || {}).navidrome || r.location || '';
+                    const dstPlatform = Object.keys(r.id || {})[0] || 'navidrome';
+                    html += '<form method="POST" action="/unmatched/match" style="display:inline">';
+                    html += '<input type="hidden" name="db_path" value="' + dbPath + '">';
+                    html += '<input type="hidden" name="rowid" value="' + rowid + '">';
+                    html += '<input type="hidden" name="src_platform" value="' + srcPlatform + '">';
+                    html += '<input type="hidden" name="src_id" value="' + srcId + '">';
+                    html += '<input type="hidden" name="src_isrc" value="' + (song.isrc || '') + '">';
+                    html += '<input type="hidden" name="src_title" value="' + (song.title || '') + '">';
+                    html += '<input type="hidden" name="src_artist" value="' + ((song.artists || [])[0] || '') + '">';
+                    html += '<input type="hidden" name="dst_platform" value="' + dstPlatform + '">';
+                    html += '<input type="hidden" name="dst_id" value="' + dstId + '">';
+                    html += '<div class="search-result-item" onclick="this.closest(\'form\').submit()">';
+                    html += '<strong>' + (r.title || '?') + '</strong>';
+                    html += ' — ' + (r.artists || ['?']).join('; ');
+                    if (r.album) html += ' <span class="has-text-grey">(' + r.album + ')</span>';
+                    html += ' <button class="button is-tiny is-success ml-2" type="submit">&#10003; match</button>';
+                    html += '</div></form>';
+                });
+                html += '</div>';
+                resultsDiv.innerHTML = html;
+            })
+            .catch(e => {
+                resultsDiv.innerHTML = '<p class="is-size-7 has-text-danger">request failed: ' + e + '</p>';
+            });
+    }
+    </script>
 </body>
 
 </html>

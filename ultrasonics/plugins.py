@@ -246,9 +246,12 @@ def applet_run(applet_id):
     """
     from datetime import datetime
     from ultrasonics.tools import history, notifications
+    from ultrasonics.tools import unmatched as unmatched_module
 
     runtime = datetime.now()
     history_id = history.record_start(applet_id)
+    n_playlists = 0
+    n_tracks = 0
 
     log.info(f"Running applet: {applet_id}")
 
@@ -266,27 +269,25 @@ def applet_run(applet_id):
                 name = plugin["plugin"]
                 version = plugin["version"]
                 data = plugin["data"]
-
                 return name, version, data
 
             "Inputs"
-            # Get new songs from input, append to songs list
             for plugin in applet_plans["inputs"]:
                 for item in plugin_run(*get_info(plugin), component="inputs", applet_id=applet_id):
                     songs_dict.append(item)
 
             "Modifiers"
-            # Replace songs with output from modifier plugin
             for plugin in applet_plans["modifiers"]:
                 songs_dict = plugin_run(
                     *get_info(plugin), songs_dict=songs_dict, component="modifiers", applet_id=applet_id)
 
             "Outputs"
-            # Submit songs dict to output plugin
             for plugin in applet_plans["outputs"]:
                 plugin_run(*get_info(plugin), component="outputs",
                            applet_id=applet_id, songs_dict=songs_dict)
 
+            n_playlists = len(songs_dict)
+            n_tracks = sum(len(p.get("songs", [])) for p in songs_dict)
             success = True
 
     except Exception as e:
@@ -296,14 +297,15 @@ def applet_run(applet_id):
 
     if success:
         duration = str(datetime.now() - runtime)
-        log.info(
-            f"Applet {applet_id} completed successfully in {duration}")
-        history.record_finish(history_id, True, summary=f"Completed in {duration}")
-        notifications.send_run_notification(applet_id, True, f"Completed in {duration}")
+        log.info(f"Applet {applet_id} completed successfully in {duration}")
+        n_unmatched = unmatched_module.count_pending()
+        summary = f"Completed in {duration} — {n_playlists} playlist(s), {n_tracks} track(s)"
+        history.record_finish(history_id, True, summary=summary,
+                              n_playlists=n_playlists, n_tracks=n_tracks, n_unmatched=n_unmatched)
+        notifications.send_run_notification(applet_id, True, summary)
     else:
         duration = str(datetime.now() - runtime)
-        log.warning(
-            f"Applet {applet_id} failed in {duration}")
+        log.warning(f"Applet {applet_id} failed in {duration}")
         history.record_finish(history_id, False, summary=f"Failed after {duration}")
         notifications.send_run_notification(applet_id, False, f"Failed after {duration}")
 

@@ -29,10 +29,10 @@ log = logs.create_log(__name__)
 
 handshake = {
     "name": "navidrome",
-    "description": "sync playlists to and from a navidrome or subsonic server",
+    "description": "sync playlists, favorites, albums, and artists to/from a navidrome or subsonic server",
     "type": ["inputs", "outputs"],
-    "mode": ["playlists"],
-    "version": "0.1",
+    "mode": ["playlists", "favorites", "albums", "artists"],
+    "version": "0.2",
     "settings": [
         {
             "type": "text",
@@ -51,6 +51,13 @@ handshake = {
             "label": "Password",
             "name": "password",
             "value": "",
+        },
+        {
+            "type": "select",
+            "label": "Sync Mode",
+            "name": "sync_mode",
+            "options": ["playlists", "favorites", "albums", "artists"],
+            "value": "playlists",
         },
         {
             "type": "string",
@@ -568,6 +575,28 @@ def test(database, **kwargs):
         raise Exception(f"Server responded with error: {error.get('message', 'unknown')}")
 
     log.info(f"Successfully connected to {server_url}")
+
+
+def search(query, database, **kwargs):
+    """
+    Search for tracks on the Navidrome server matching `query`.
+    Used by the manual matching UI.
+    Returns a list of song dicts.
+    """
+    server_url = database.get("server_url", "").strip()
+    username = database.get("username", "").strip()
+    password = database.get("password", "")
+
+    if not server_url or not username or not password:
+        return []
+
+    try:
+        api = Subsonic(server_url, username, password)
+        results = api.search(query, count=20)
+        return [api.subsonic_to_songs_dict(r) for r in results]
+    except Exception as e:
+        log.warning(f"Navidrome search failed: {e}")
+        return []
 
 
 def builder(**kwargs):

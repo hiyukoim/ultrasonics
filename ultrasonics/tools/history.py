@@ -38,6 +38,9 @@ def _init_db():
             "  started INTEGER NOT NULL,"
             "  finished INTEGER,"
             "  success INTEGER,"
+            "  n_playlists INTEGER DEFAULT 0,"
+            "  n_tracks INTEGER DEFAULT 0,"
+            "  n_unmatched INTEGER DEFAULT 0,"
             "  summary TEXT"
             ")"
         )
@@ -45,6 +48,14 @@ def _init_db():
             "CREATE INDEX IF NOT EXISTS idx_history_applet "
             "ON run_history(applet_id, started DESC)"
         )
+        # add columns to existing tables that predate this migration
+        for col, typ in [("n_playlists", "INTEGER DEFAULT 0"),
+                         ("n_tracks", "INTEGER DEFAULT 0"),
+                         ("n_unmatched", "INTEGER DEFAULT 0")]:
+            try:
+                conn.execute(f"ALTER TABLE run_history ADD COLUMN {col} {typ}")
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
     return db_path
 
@@ -62,14 +73,16 @@ def record_start(applet_id):
         return cursor.lastrowid
 
 
-def record_finish(row_id, success, summary=None):
+def record_finish(row_id, success, summary=None, n_playlists=0, n_tracks=0, n_unmatched=0):
     """Record that an applet run has finished."""
     db_path = _init_db()
     now = int(time.time())
     with sqlite3.connect(db_path) as conn:
         conn.execute(
-            "UPDATE run_history SET finished = ?, success = ?, summary = ? WHERE id = ?",
-            (now, 1 if success else 0, summary, row_id),
+            "UPDATE run_history SET finished = ?, success = ?, summary = ?, "
+            "n_playlists = ?, n_tracks = ?, n_unmatched = ? WHERE id = ?",
+            (now, 1 if success else 0, summary,
+             n_playlists, n_tracks, n_unmatched, row_id),
         )
         conn.commit()
 
