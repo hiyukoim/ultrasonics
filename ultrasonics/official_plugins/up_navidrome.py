@@ -11,13 +11,17 @@ Uses the Subsonic REST API with token-based authentication.
 """
 
 import hashlib
+import json
 import os
 import re
 import secrets
+import sqlite3
+import time
 
 import requests
 from tqdm import tqdm
 
+from app import _ultrasonics
 from ultrasonics import logs
 from ultrasonics.tools import fuzzymatch, name_filter
 
@@ -236,6 +240,65 @@ def run(settings_dict, **kwargs):
 
             return item
 
+    class UnmatchedStore:
+        """
+        SQLite store for tracks that could not be matched on the destination.
+        Re-attempted on each run; removed once matched successfully.
+        """
+
+        def __init__(self):
+            db_dir = os.path.join(_ultrasonics["config_dir"], "up_navidrome")
+            try:
+                os.makedirs(db_dir, exist_ok=True)
+            except OSError:
+                pass
+            self.db_path = os.path.join(db_dir, "unmatched.db")
+
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS unmatched ("
+                    "  applet_id TEXT,"
+                    "  playlist_id TEXT,"
+                    "  song_json TEXT,"
+                    "  first_seen INTEGER,"
+                    "  last_tried INTEGER,"
+                    "  status TEXT DEFAULT 'pending',"
+                    "  UNIQUE(applet_id, playlist_id, song_json)"
+                    ")"
+                )
+                conn.commit()
+
+        def get_pending(self, applet_id, playlist_id):
+            """Return list of (rowid, song_dict) for pending unmatched tracks."""
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute(
+                    "SELECT rowid, song_json FROM unmatched "
+                    "WHERE applet_id = ? AND playlist_id = ? AND status = 'pending'",
+                    (applet_id, playlist_id),
+                )
+                rows = cursor.fetchall()
+            return [(row[0], json.loads(row[1])) for row in rows]
+
+        def mark_resolved(self, rowid):
+            """Remove a successfully matched track."""
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("DELETE FROM unmatched WHERE rowid = ?", (rowid,))
+                conn.commit()
+
+        def upsert(self, applet_id, playlist_id, song):
+            """Insert or update an unmatched track."""
+            song_json = json.dumps(song, ensure_ascii=False, sort_keys=True)
+            now = int(time.time())
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "INSERT INTO unmatched (applet_id, playlist_id, song_json, first_seen, last_tried, status) "
+                    "VALUES (?, ?, ?, ?, ?, 'pending') "
+                    "ON CONFLICT(applet_id, playlist_id, song_json) "
+                    "DO UPDATE SET last_tried = ?, status = 'pending'",
+                    (applet_id, playlist_id, song_json, now, now, now),
+                )
+                conn.commit()
+
     # Instantiate the API client
     server_url = database.get("server_url", "").strip()
     username = database.get("username", "").strip()
@@ -247,6 +310,8 @@ def run(settings_dict, **kwargs):
         )
 
     api = Subsonic(server_url, username, password)
+
+    unmatched_store = UnmatchedStore()
 
     if component == "inputs":
         # Get all playlists from the server
@@ -325,25 +390,15 @@ def run(settings_dict, **kwargs):
             existing_tracks = [api.subsonic_to_songs_dict(e) for e in existing_entries]
             existing_ids = [e.get("id", "") for e in existing_entries]
 
-            # Find songs to add
-            song_ids_to_add = []
-
-            log.info(f"Matching songs for playlist '{playlist_name}'...")
-            for song in tqdm(
-                playlist.get("songs", []),
-                desc=f"Matching songs for '{playlist_name}'",
-            ):
-                # Check if song already exists in playlist via fuzzy match
-                is_duplicate = fuzzymatch.duplicate(song, existing_tracks, fuzzy_ratio)
-                if is_duplicate:
-                    continue
-
+            def _search_and_match(song):
+                """
+                Try to find a matching track on the server.
+                Returns the navidrome track ID on success, None on failure.
+                """
                 # Try direct navidrome ID
                 try:
                     nav_id = song["id"]["navidrome"]
-                    if nav_id not in existing_ids:
-                        song_ids_to_add.append(nav_id)
-                    continue
+                    return nav_id
                 except KeyError:
                     pass
 
@@ -355,17 +410,14 @@ def run(settings_dict, **kwargs):
                     query_parts.append(song["artists"][0])
 
                 if not query_parts:
-                    log.debug(f"Cannot search for song with no title or artist, skipping.")
-                    continue
+                    return None
 
                 query = " ".join(query_parts)
                 results = api.search(query, count=10)
 
                 if not results:
-                    log.debug(f"No results found for '{query}', skipping.")
-                    continue
+                    return None
 
-                # Convert results and fuzzy match
                 best_score = 0
                 best_id = None
 
@@ -377,12 +429,48 @@ def run(settings_dict, **kwargs):
                         best_id = result.get("id")
 
                 if best_score >= fuzzy_ratio and best_id:
-                    if best_id not in existing_ids:
-                        song_ids_to_add.append(best_id)
+                    return best_id
+                return None
+
+            # Find songs to add
+            song_ids_to_add = []
+
+            # Re-attempt previously unmatched tracks first
+            pending = unmatched_store.get_pending(applet_id, playlist_id)
+            if pending:
+                log.info(f"Re-attempting {len(pending)} previously unmatched tracks...")
+                for rowid, song in pending:
+                    is_duplicate = fuzzymatch.duplicate(song, existing_tracks, fuzzy_ratio)
+                    if is_duplicate:
+                        unmatched_store.mark_resolved(rowid)
+                        continue
+                    matched_id = _search_and_match(song)
+                    if matched_id and matched_id not in existing_ids:
+                        song_ids_to_add.append(matched_id)
+                        unmatched_store.mark_resolved(rowid)
+                    else:
+                        unmatched_store.upsert(applet_id, playlist_id, song)
+
+            log.info(f"Matching songs for playlist '{playlist_name}'...")
+            for song in tqdm(
+                playlist.get("songs", []),
+                desc=f"Matching songs for '{playlist_name}'",
+            ):
+                # Check if song already exists in playlist via fuzzy match
+                is_duplicate = fuzzymatch.duplicate(song, existing_tracks, fuzzy_ratio)
+                if is_duplicate:
+                    continue
+
+                matched_id = _search_and_match(song)
+
+                if matched_id:
+                    if matched_id not in existing_ids:
+                        song_ids_to_add.append(matched_id)
                 else:
                     log.debug(
-                        f"Could not match '{song.get('title', '?')}' (best score: {best_score:.1f}), skipping."
+                        f"Could not match '{song.get('title', '?')}', storing as unmatched."
                     )
+                    unmatched_store.upsert(applet_id, playlist_id, song)
 
             # Handle update mode — remove songs not in source
             if settings_dict.get("existing_playlists") == "Update" and existing_entries:
