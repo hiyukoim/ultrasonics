@@ -36,7 +36,7 @@ HEADER_ALIASES = {
     "ids":      ["ids"],
     "track_uri":["track uri", "spotify uri"],
     "spotify_id":["spotify_id", "spotify id"],
-    "playlist": ["playlist", "name"],
+    "playlist": ["playlist"],
 }
 
 handshake = {
@@ -134,7 +134,8 @@ def _spotify_id_from_uri(uri):
 def _build_column_map(headers):
     """
     Given a list of CSV header strings, return a dict mapping
-    canonical field name -> column index. Unrecognised headers are skipped.
+    canonical field name -> (column_index, matched_alias).
+    Unrecognised headers are skipped.
     """
     headers_lower = [h.lower().strip() for h in headers]
     col_map = {}
@@ -142,7 +143,7 @@ def _build_column_map(headers):
     for canonical, aliases in HEADER_ALIASES.items():
         for alias in aliases:
             if alias in headers_lower:
-                col_map[canonical] = headers_lower.index(alias)
+                col_map[canonical] = (headers_lower.index(alias), alias)
                 break
 
     return col_map
@@ -154,10 +155,17 @@ def _row_to_song(row, col_map):
     Returns None if neither title nor artist is present.
     """
     def get(canonical):
-        idx = col_map.get(canonical)
-        if idx is None or idx >= len(row):
+        entry = col_map.get(canonical)
+        if entry is None:
+            return ""
+        idx, _ = entry
+        if idx >= len(row):
             return ""
         return row[idx].strip()
+
+    def get_alias(canonical):
+        entry = col_map.get(canonical)
+        return entry[1] if entry is not None else None
 
     # --- title ---
     title = get("title")
@@ -165,8 +173,10 @@ def _row_to_song(row, col_map):
     # --- artists ---
     if "artists" in col_map:
         raw = get("artists")
-        # Check if this looks like exportify format (backslash-escaped commas)
-        if r'\,' in raw or (", " in raw and "; " not in raw):
+        # Branch on the matched header alias, not cell contents.
+        # Only exportify's "artist name(s)" column uses comma-separation with \,-escaping.
+        # Our own export and all other aliases are always ; -joined.
+        if get_alias("artists") == "artist name(s)":
             artists = _artists_from_exportify(raw)
         else:
             artists = _artists_from_str(raw, "; ")
@@ -320,9 +330,11 @@ def run(settings_dict, **kwargs):
                         continue
 
                     # Determine playlist name for this row
-                    playlist_col = col_map.get("playlist")
-                    if playlist_col is not None and playlist_col < len(row):
-                        playlist_name = row[playlist_col].strip() or filename
+                    playlist_entry = col_map.get("playlist")
+                    if playlist_entry is not None:
+                        playlist_col = playlist_entry[0]
+                        playlist_name = row[playlist_col].strip() if playlist_col < len(row) else filename
+                        playlist_name = playlist_name or filename
                     else:
                         playlist_name = filename
 
