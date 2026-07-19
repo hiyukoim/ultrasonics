@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ultrasonics - apple music auth</title>
+    <link rel="shortcut icon" href="/static/images/favicon.ico">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.0/css/bulma.min.css">
+    <link rel="stylesheet" type="text/css" href="https://unpkg.com/bulma-prefers-dark">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap">
+    <link rel="stylesheet" href="/static/css/custom.css">
+</head>
+<body class="has-background-animated">
+<div class="container">
+    <section class="section">
+        <img src="/static/images/logo.svg">
+
+        <div class="columns is-vcentered mb-4">
+            <div class="column">
+                <a href="/" class="button is-small">&#8592; home</a>
+            </div>
+            <div class="column has-text-centered">
+                <h2 class="title is-4">apple music authorisation</h2>
+            </div>
+            <div class="column"></div>
+        </div>
+
+        <div class="box">
+            <h3 class="title is-5">step 1 — enter your developer token</h3>
+            <p class="is-size-7 mb-3">
+                Generate this in your plugin settings (it is derived from your Team ID, Key ID, and .p8 private key).
+                You can also generate it manually and paste it below.
+            </p>
+            <div class="field has-addons">
+                <div class="control is-expanded">
+                    <input id="dev_token_input" class="input" type="text"
+                           placeholder="paste developer JWT here"
+                           value="{{ dev_token }}">
+                </div>
+                <div class="control">
+                    <button class="button" onclick="loadMusicKit()">load musickit</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="box" id="auth_box" style="display:none">
+            <h3 class="title is-5">step 2 — authorise with apple</h3>
+            <p class="is-size-7 mb-3">Click the button below to open Apple's sign-in dialog. After granting access your user music token will appear below.</p>
+            <button class="button" id="auth_button" onclick="doAuth()">sign in with apple music</button>
+        </div>
+
+        <div class="box" id="token_box" style="display:none">
+            <h3 class="title is-5">step 3 — copy your user music token</h3>
+            <p class="is-size-7 mb-3">Paste this value into the <strong>User Music Token</strong> field in your Apple Music plugin settings.</p>
+            <div class="field">
+                <div class="control">
+                    <textarea id="user_token_output" class="textarea is-family-monospace is-size-7" rows="4" readonly></textarea>
+                </div>
+            </div>
+            <button class="button is-small mt-2" onclick="copyToken()">copy to clipboard</button>
+            <span id="copy_msg" class="is-size-7 ml-2" style="display:none">copied!</span>
+        </div>
+
+        <div class="notification is-warning is-light is-size-7 mt-4">
+            <strong>Note:</strong> User music tokens are valid for 6 months. After they expire you will need to re-authorise here and update the token in your plugin settings.
+        </div>
+
+    </section>
+    <div class="section has-text-centered">
+        <p><strong>ultrasonics</strong> by <a class="p1" href="https://github.com/XDGFX/ultrasonics">XDGFX</a>. do more with your music.</p>
+    </div>
+</div>
+
+<script>
+let music = null;
+
+function loadMusicKit() {
+    const token = document.getElementById('dev_token_input').value.trim();
+    if (!token) { alert('Please paste a developer token first.'); return; }
+
+    const script = document.createElement('script');
+    script.src = 'https://js-cdn.music.apple.com/musickit/v1/musickit.js';
+    script.onload = () => {
+        MusicKit.configure({ developerToken: token, app: { name: 'ultrasonics', build: '1.0' } });
+        music = MusicKit.getInstance();
+        document.getElementById('auth_box').style.display = '';
+    };
+    script.onerror = () => alert('Failed to load MusicKit JS — check your internet connection or developer token.');
+    document.head.appendChild(script);
+}
+
+async function doAuth() {
+    if (!music) { alert('MusicKit not loaded yet.'); return; }
+    try {
+        const userToken = await music.authorize();
+        document.getElementById('user_token_output').value = userToken;
+        document.getElementById('token_box').style.display = '';
+    } catch (e) {
+        alert('Authorisation failed: ' + e.message);
+    }
+}
+
+function copyToken() {
+    const ta = document.getElementById('user_token_output');
+    ta.select();
+    document.execCommand('copy');
+    const msg = document.getElementById('copy_msg');
+    msg.style.display = '';
+    setTimeout(() => msg.style.display = 'none', 2000);
+}
+</script>
+</body>
+</html>

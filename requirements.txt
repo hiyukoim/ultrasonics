@@ -11,3 +11,12 @@ python-Levenshtein==0.12.2
 spotipy==2.19.0
 tqdm==4.62.3
 PlexAPI==4.7.2
+
+# Wave 2 adapters
+ytmusicapi>=1.7.0
+google-api-python-client>=2.80.0
+google-auth-oauthlib>=1.0.0
+
+# Apple Music (up_apple music)
+PyJWT>=2.6.0
+cryptography>=40.0.0

@@ -543,6 +543,163 @@ def migrate_unmatched_stores():
     return migrated
 
 
+def list_playlists():
+    """Return all playlists with track counts and platform link info."""
+    conn = _get_db()
+    rows = conn.execute(
+        """SELECT p.canonical_id, p.name, p.description, p.image, p.updated,
+                  COUNT(pt.track_canonical_id) AS track_count
+           FROM playlists p
+           LEFT JOIN playlist_tracks pt ON pt.playlist_canonical_id = p.canonical_id
+           GROUP BY p.canonical_id
+           ORDER BY p.updated DESC"""
+    ).fetchall()
+    result = []
+    for r in rows:
+        pl = dict(r)
+        pl["platforms"] = [
+            lr["platform"]
+            for lr in conn.execute(
+                "SELECT platform FROM playlist_links WHERE canonical_id = ?",
+                (r["canonical_id"],),
+            ).fetchall()
+        ]
+        result.append(pl)
+    return result
+
+
+def get_playlist(playlist_canonical_id):
+    """Return a single playlist row with platform links, or None."""
+    conn = _get_db()
+    row = conn.execute(
+        "SELECT canonical_id, name, description, image, updated FROM playlists WHERE canonical_id = ?",
+        (playlist_canonical_id,),
+    ).fetchone()
+    if not row:
+        return None
+    pl = dict(row)
+    pl["platforms"] = [
+        dict(lr)
+        for lr in conn.execute(
+            "SELECT platform, platform_id FROM playlist_links WHERE canonical_id = ?",
+            (playlist_canonical_id,),
+        ).fetchall()
+    ]
+    return pl
+
+
+def get_playlist_tracks_with_links(playlist_canonical_id):
+    """
+    Like get_playlist_tracks() but also returns per-track link status across all platforms.
+    Each item: songs_dict fields + 'links': [{platform, platform_id, status}].
+    """
+    conn = _get_db()
+    rows = conn.execute(
+        """SELECT t.canonical_id, t.title, t.artists_json, t.album, t.date, t.isrc, t.image
+           FROM playlist_tracks pt
+           JOIN tracks t ON t.canonical_id = pt.track_canonical_id
+           WHERE pt.playlist_canonical_id = ?
+           ORDER BY pt.position""",
+        (playlist_canonical_id,),
+    ).fetchall()
+
+    result = []
+    for r in rows:
+        links = [
+            dict(lr)
+            for lr in conn.execute(
+                "SELECT platform, platform_id, status FROM track_links WHERE canonical_id = ?",
+                (r["canonical_id"],),
+            ).fetchall()
+        ]
+        result.append({
+            "canonical_id": r["canonical_id"],
+            "title": r["title"],
+            "artists": json.loads(r["artists_json"] or "[]"),
+            "album": r["album"],
+            "date": r["date"],
+            "isrc": r["isrc"],
+            "image": r["image"],
+            "links": links,
+        })
+    return result
+
+
+def delete_playlist(playlist_canonical_id):
+    """Remove a playlist and its membership rows from the vault (tracks are kept)."""
+    conn = _get_db()
+    conn.execute("DELETE FROM playlist_tracks WHERE playlist_canonical_id = ?", (playlist_canonical_id,))
+    conn.execute("DELETE FROM playlist_links WHERE canonical_id = ?", (playlist_canonical_id,))
+    conn.execute("DELETE FROM playlists WHERE canonical_id = ?", (playlist_canonical_id,))
+    conn.commit()
+
+
+def dump_json():
+    """
+    Export the entire vault as a JSON-serialisable dict.
+    Structure: {tracks, track_links, playlists, playlist_links, playlist_tracks}
+    """
+    conn = _get_db()
+    return {
+        "tracks": [dict(r) for r in conn.execute("SELECT * FROM tracks").fetchall()],
+        "track_links": [dict(r) for r in conn.execute("SELECT * FROM track_links").fetchall()],
+        "playlists": [dict(r) for r in conn.execute("SELECT * FROM playlists").fetchall()],
+        "playlist_links": [dict(r) for r in conn.execute("SELECT * FROM playlist_links").fetchall()],
+        "playlist_tracks": [dict(r) for r in conn.execute("SELECT * FROM playlist_tracks").fetchall()],
+    }
+
+
+def restore_json(data):
+    """
+    Restore vault from a dump_json() dict. Merges into existing data (upserts).
+    Safe to call on a fresh or existing vault.
+    """
+    conn = _get_db()
+    now = int(time.time())
+    for r in data.get("tracks", []):
+        conn.execute(
+            """INSERT INTO tracks (canonical_id,isrc,upc,title,artists_json,album,date,image,created,updated)
+               VALUES (?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(canonical_id) DO UPDATE SET
+                 isrc=COALESCE(excluded.isrc,isrc), upc=COALESCE(excluded.upc,upc),
+                 title=excluded.title, artists_json=excluded.artists_json,
+                 album=COALESCE(excluded.album,album), date=COALESCE(excluded.date,date),
+                 image=COALESCE(excluded.image,image), updated=excluded.updated""",
+            (r["canonical_id"], r.get("isrc"), r.get("upc"), r["title"],
+             r.get("artists_json","[]"), r.get("album"), r.get("date"),
+             r.get("image"), r.get("created", now), r.get("updated", now)),
+        )
+    for r in data.get("track_links", []):
+        conn.execute(
+            """INSERT INTO track_links (canonical_id,platform,platform_id,status,updated)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(canonical_id,platform) DO UPDATE SET
+                 platform_id=COALESCE(excluded.platform_id,platform_id),
+                 status=excluded.status, updated=excluded.updated""",
+            (r["canonical_id"], r["platform"], r.get("platform_id"), r["status"], r.get("updated", now)),
+        )
+    for r in data.get("playlists", []):
+        conn.execute(
+            """INSERT INTO playlists (canonical_id,name,description,image,updated)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(canonical_id) DO UPDATE SET
+                 name=excluded.name, description=COALESCE(excluded.description,description),
+                 image=COALESCE(excluded.image,image), updated=excluded.updated""",
+            (r["canonical_id"], r["name"], r.get("description"), r.get("image"), r.get("updated", now)),
+        )
+    for r in data.get("playlist_links", []):
+        conn.execute(
+            "INSERT OR REPLACE INTO playlist_links (canonical_id,platform,platform_id) VALUES (?,?,?)",
+            (r["canonical_id"], r["platform"], r["platform_id"]),
+        )
+    for r in data.get("playlist_tracks", []):
+        conn.execute(
+            "INSERT OR REPLACE INTO playlist_tracks (playlist_canonical_id,track_canonical_id,position) VALUES (?,?,?)",
+            (r["playlist_canonical_id"], r["track_canonical_id"], r.get("position", 0)),
+        )
+    conn.commit()
+
+
 def stats():
     """Return basic vault statistics."""
     conn = _get_db()

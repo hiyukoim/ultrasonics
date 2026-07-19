@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ultrasonics - restore vault</title>
+    <link rel="shortcut icon" href="/static/images/favicon.ico">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.0/css/bulma.min.css">
+    <link rel="stylesheet" type="text/css" href="https://unpkg.com/bulma-prefers-dark">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap">
+    <link rel="stylesheet" href="/static/css/custom.css">
+</head>
+<body class="has-background-animated">
+<div class="container">
+    <section class="section">
+        <img src="/static/images/logo.svg">
+
+        <div class="columns is-vcentered mb-4">
+            <div class="column">
+                <a href="/vault" class="button is-small">&#8592; vault</a>
+            </div>
+            <div class="column has-text-centered">
+                <h2 class="title is-4">restore vault from backup</h2>
+            </div>
+            <div class="column"></div>
+        </div>
+
+        {% if msg %}
+        <div class="notification {% if 'error' in msg.lower() or 'fail' in msg.lower() %}is-danger{% else %}is-success{% endif %} is-light">
+            {{ msg }}
+        </div>
+        {% endif %}
+
+        <div class="box">
+            <p class="mb-3 is-size-7">
+                Upload a <code>ultrasonics-vault.json</code> backup file previously exported from this app.
+                Existing vault data is kept — the restore merges (upserts) rather than replacing.
+            </p>
+            <form method="POST" action="/vault/restore" enctype="multipart/form-data">
+                <div class="field">
+                    <label class="label">Backup file (.json)</label>
+                    <div class="control">
+                        <input class="input" type="file" name="backup_file" accept=".json" required>
+                    </div>
+                </div>
+                <div class="field">
+                    <div class="control">
+                        <button class="button" type="submit">restore</button>
+                    </div>
+                </div>
+            </form>
+        </div>
+
+    </section>
+    <div class="section has-text-centered">
+        <p><strong>ultrasonics</strong> by <a class="p1" href="https://github.com/XDGFX/ultrasonics">XDGFX</a>. do more with your music.</p>
+    </div>
+</div>
+</body>
+</html>

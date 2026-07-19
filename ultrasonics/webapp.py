@@ -14,11 +14,20 @@ from flask import Flask, jsonify, redirect, render_template, request
 from flask_socketio import SocketIO, emit, send
 
 from ultrasonics import database, logs, plugins
-from ultrasonics.tools import history, matchings, random_words, unmatched
+from ultrasonics.tools import history, matchings, random_words, unmatched, vault
 
 log = logs.create_log(__name__)
 
 app = Flask(__name__)
+
+
+@app.template_filter('strftime')
+def _strftime(ts):
+    import datetime
+    try:
+        return datetime.datetime.fromtimestamp(int(ts)).strftime('%Y-%m-%d %H:%M')
+    except Exception:
+        return ''
 
 sio = SocketIO(app, async_mode='eventlet')
 
@@ -402,6 +411,113 @@ def html_history():
             item['duration'] = '?'
 
     return render_template('history.html', items=items)
+
+# --- VAULT ROUTES ---
+
+@app.route('/vault')
+def html_vault():
+    try:
+        playlists = vault.list_playlists()
+        vstats = vault.stats()
+    except Exception as exc:
+        log.warning(f"vault: error loading dashboard: {exc}")
+        playlists = []
+        vstats = {"tracks": 0, "playlists": 0, "links_orphan": 0}
+    return render_template('vault.html', playlists=playlists, stats=vstats)
+
+
+@app.route('/vault/playlist/<pid>', methods=['GET', 'POST'])
+def html_vault_playlist(pid):
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'delete':
+            vault.delete_playlist(pid)
+            return redirect('/vault')
+        if action == 'push':
+            target = request.form.get('target_platform', '').strip()
+            if not target:
+                return redirect(f'/vault/playlist/{pid}')
+            # Build a synthetic songs_dict from the vault and dispatch via the
+            # matching output plugin if configured, otherwise just report what
+            # would be exported.
+            try:
+                pl = vault.get_playlist(pid)
+                songs_for_platform = vault.export_for_platform(pid, target)
+                n_linked = sum(1 for s in songs_for_platform if s.get("id", {}).get(target))
+                n_orphan = len(songs_for_platform) - n_linked
+                msg = f"Push queued: {n_linked} tracks ready, {n_orphan} orphan on {target}."
+            except Exception as exc:
+                msg = f"Push error: {exc}"
+            return render_template(
+                'vault_playlist.html',
+                pl=vault.get_playlist(pid),
+                tracks=vault.get_playlist_tracks_with_links(pid),
+                msg=msg,
+                known_platforms=_KNOWN_PLATFORMS,
+            )
+        return redirect(f'/vault/playlist/{pid}')
+
+    pl = vault.get_playlist(pid)
+    if not pl:
+        return "Playlist not found", 404
+    tracks = vault.get_playlist_tracks_with_links(pid)
+    return render_template(
+        'vault_playlist.html',
+        pl=pl,
+        tracks=tracks,
+        msg=None,
+        known_platforms=_KNOWN_PLATFORMS,
+    )
+
+
+@app.route('/vault/export')
+def html_vault_export():
+    import json as _json
+    try:
+        data = vault.dump_json()
+        payload = _json.dumps(data, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        return f"Export error: {exc}", 500
+    return app.response_class(
+        payload,
+        mimetype='application/json',
+        headers={'Content-Disposition': 'attachment; filename="ultrasonics-vault.json"'},
+    )
+
+
+@app.route('/vault/restore', methods=['GET', 'POST'])
+def html_vault_restore():
+    msg = None
+    if request.method == 'POST':
+        f = request.files.get('backup_file')
+        if f:
+            import json as _json
+            try:
+                data = _json.loads(f.read().decode('utf-8'))
+                vault.restore_json(data)
+                msg = "Vault restored successfully."
+            except Exception as exc:
+                msg = f"Restore failed: {exc}"
+    return render_template('vault_restore.html', msg=msg)
+
+
+_KNOWN_PLATFORMS = [
+    "spotify", "navidrome", "soundcloud", "youtube", "ytmusic",
+    "apple music", "bandcamp", "deezer", "tidal", "qobuz",
+]
+
+
+@app.route('/apple_music/auth/request', methods=['GET'])
+def html_apple_music_auth():
+    """
+    Renders a page that loads MusicKit JS, authorises the user, and displays
+    the resulting user music token for manual copy-paste back into the plugin settings.
+    The developer token is built server-side from the configured credentials.
+    """
+    # Try to find an applet with Apple Music configured to pull dev token
+    dev_token = request.args.get('dev_token', '')
+    return render_template('apple_music_auth.html', dev_token=dev_token)
+
 
 # --- WEBSOCKET ROUTES ---
 

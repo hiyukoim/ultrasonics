@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ultrasonics - vault</title>
+    <meta name="description" content="master playlist vault">
+    <link rel="shortcut icon" href="/static/images/favicon.ico">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.0/css/bulma.min.css">
+    <link rel="stylesheet" type="text/css" href="https://unpkg.com/bulma-prefers-dark">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap">
+    <link rel="stylesheet" href="/static/css/custom.css">
+    <style>
+        .vault-stat { border: 1px solid var(--grey-dark); border-radius:4px; padding:1rem; text-align:center; }
+        .vault-stat .num { font-size:2rem; font-weight:700; color:var(--primary-1); }
+        .platform-dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--primary-1); margin-right:3px; }
+        .orphan-dot   { background:var(--primary-2); }
+        .pl-row td { vertical-align:middle; }
+    </style>
+</head>
+<body class="has-background-animated">
+<div class="container">
+    <section class="section">
+        <img src="/static/images/logo.svg">
+
+        <div class="columns is-vcentered mb-2">
+            <div class="column">
+                <a href="/" class="button is-small">&#8592; back</a>
+            </div>
+            <div class="column has-text-centered">
+                <h2 class="title is-4">vault — master library</h2>
+            </div>
+            <div class="column has-text-right">
+                <div class="buttons is-right">
+                    <a href="/vault/export" class="button is-small">&#8595; export backup</a>
+                    <a href="/vault/restore" class="button is-small">&#8593; restore backup</a>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stats bar -->
+        <div class="columns mb-4">
+            <div class="column"><div class="vault-stat"><div class="num">{{ stats.tracks }}</div><div>tracks</div></div></div>
+            <div class="column"><div class="vault-stat"><div class="num">{{ stats.playlists }}</div><div>playlists</div></div></div>
+            <div class="column"><div class="vault-stat"><div class="num">{{ stats.links_orphan }}</div><div>orphans</div></div></div>
+        </div>
+
+        {% if playlists %}
+        <table class="table is-fullwidth is-hoverable is-striped">
+            <thead>
+                <tr>
+                    <th>Playlist</th>
+                    <th>Tracks</th>
+                    <th>Platforms</th>
+                    <th>Last Updated</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for pl in playlists %}
+                <tr class="pl-row">
+                    <td>
+                        <a href="/vault/playlist/{{ pl.canonical_id }}" class="p1">{{ pl.name }}</a>
+                    </td>
+                    <td>{{ pl.track_count }}</td>
+                    <td>
+                        {% for p in pl.platforms %}
+                        <span class="tag is-small">{{ p }}</span>
+                        {% endfor %}
+                    </td>
+                    <td>
+                        {% if pl.updated %}
+                        <span class="is-size-7">{{ pl.updated | int | strftime }}</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <a href="/vault/playlist/{{ pl.canonical_id }}" class="button is-small">view</a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="notification is-info is-light has-text-centered">
+            <p>The vault is empty.</p>
+            <p class="is-size-7 mt-2">Run an applet with any input plugin and the vault will populate automatically.</p>
+        </div>
+        {% endif %}
+
+    </section>
+    <div class="section has-text-centered">
+        <p><strong>ultrasonics</strong> by <a class="p1" href="https://github.com/XDGFX/ultrasonics">XDGFX</a>. do more with your music.</p>
+    </div>
+</div>
+</body>
+</html>

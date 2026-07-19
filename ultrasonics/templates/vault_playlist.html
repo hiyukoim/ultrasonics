@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ultrasonics - {{ pl.name }}</title>
+    <link rel="shortcut icon" href="/static/images/favicon.ico">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.0/css/bulma.min.css">
+    <link rel="stylesheet" type="text/css" href="https://unpkg.com/bulma-prefers-dark">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap">
+    <link rel="stylesheet" href="/static/css/custom.css">
+    <style>
+        .link-badge { display:inline-block; padding:2px 6px; border-radius:3px; font-size:.7rem; margin-right:3px; }
+        .link-linked { background:var(--primary-1); color:#111; }
+        .link-orphan { background:var(--primary-2); color:#111; }
+        .link-none   { background:var(--grey-dark);  color:#fff; }
+        .track-image { width:36px; height:36px; object-fit:cover; border-radius:3px; }
+        .track-image-placeholder { width:36px; height:36px; background:var(--grey-dark); border-radius:3px; display:inline-block; }
+        table.tracks-table td { vertical-align:middle; }
+        .push-form select, .push-form .button { height:2.2em; }
+    </style>
+</head>
+<body class="has-background-animated">
+<div class="container">
+    <section class="section">
+        <img src="/static/images/logo.svg">
+
+        <div class="columns is-vcentered mb-2">
+            <div class="column">
+                <a href="/vault" class="button is-small">&#8592; vault</a>
+            </div>
+            <div class="column has-text-centered">
+                <h2 class="title is-4">{{ pl.name }}</h2>
+                {% if pl.description %}<p class="subtitle is-6">{{ pl.description }}</p>{% endif %}
+            </div>
+            <div class="column has-text-right">
+                <form method="POST" action="/vault/playlist/{{ pl.canonical_id }}" style="display:inline">
+                    <input type="hidden" name="action" value="delete">
+                    <button class="button is-small is-danger is-outlined" type="submit"
+                        onclick="return confirm('Delete this playlist from the vault? Tracks are kept.')">
+                        delete
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Platform links row -->
+        <div class="mb-3">
+            <span class="is-size-7 has-text-grey">on platforms: </span>
+            {% for p in pl.platforms %}
+            <span class="tag is-small">{{ p.platform }}{% if p.platform_id %} · {{ p.platform_id[:12] }}{% endif %}</span>
+            {% else %}
+            <span class="is-size-7 has-text-grey">none linked yet</span>
+            {% endfor %}
+        </div>
+
+        <!-- Push to platform -->
+        <div class="box mb-4">
+            <p class="is-size-7 mb-2"><strong>push to platform</strong> — exports this playlist to a target platform.
+            Tracks without a resolved ID on that platform are flagged as orphans and can be manually matched.</p>
+            <form method="POST" action="/vault/playlist/{{ pl.canonical_id }}" class="push-form">
+                <input type="hidden" name="action" value="push">
+                <div class="field has-addons">
+                    <div class="control is-expanded">
+                        <div class="select is-fullwidth">
+                            <select name="target_platform">
+                                {% for p in known_platforms %}
+                                <option value="{{ p }}">{{ p }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </div>
+                    <div class="control">
+                        <button class="button" type="submit">push &#8594;</button>
+                    </div>
+                </div>
+            </form>
+            {% if msg %}
+            <div class="notification is-info is-light mt-2 is-size-7">{{ msg }}</div>
+            {% endif %}
+        </div>
+
+        <!-- Track list -->
+        <p class="is-size-7 has-text-grey mb-2">{{ tracks | length }} tracks</p>
+
+        {% if tracks %}
+        <table class="table is-fullwidth is-striped is-hoverable tracks-table">
+            <thead>
+                <tr>
+                    <th style="width:44px">#</th>
+                    <th style="width:44px"></th>
+                    <th>Title</th>
+                    <th>Artist</th>
+                    <th>Album</th>
+                    <th>ISRC</th>
+                    <th>Platforms</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for t in tracks %}
+                <tr>
+                    <td class="has-text-grey is-size-7">{{ loop.index }}</td>
+                    <td>
+                        {% if t.image %}
+                        <img src="{{ t.image }}" class="track-image" alt="" loading="lazy">
+                        {% else %}
+                        <span class="track-image-placeholder"></span>
+                        {% endif %}
+                    </td>
+                    <td>{{ t.title }}</td>
+                    <td class="is-size-7">{{ t.artists | join(', ') }}</td>
+                    <td class="is-size-7">{{ t.album or '' }}</td>
+                    <td class="is-size-7"><code>{{ t.isrc or '' }}</code></td>
+                    <td>
+                        {% for lnk in t.links %}
+                        <span class="link-badge link-{{ lnk.status }}" title="{{ lnk.platform_id or 'no id' }}">
+                            {{ lnk.platform }}
+                        </span>
+                        {% endfor %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="notification is-warning is-light has-text-centered">No tracks in this playlist yet.</div>
+        {% endif %}
+
+    </section>
+    <div class="section has-text-centered">
+        <p><strong>ultrasonics</strong> by <a class="p1" href="https://github.com/XDGFX/ultrasonics">XDGFX</a>. do more with your music.</p>
+    </div>
+</div>
+</body>
+</html>
