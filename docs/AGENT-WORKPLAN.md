@@ -1,5 +1,7 @@
 # Autonomous Agent Work Plan — Ultrasonics → Soundiiz parity
 
+This is a personal fork: a self-hosted Soundiiz alternative and **source of truth** for playlists across Spotify, Navidrome, SoundCloud, Bandcamp. The app must keep track info even when a track isn't findable on a platform (orphans), and allow relinking later. Build order now: finish **T8**, then **T0 (vault)**, migrate unmatched into it, then adapter waves.
+
 Work through tasks **top to bottom, one commit per task**. Do not wait for approval between tasks. Only stop to ask if a task is truly blocked (missing credential, external API 404, ambiguous product decision). Otherwise pick the reasonable option and keep going.
 
 ## Global rules (apply to every task)
@@ -17,6 +19,20 @@ Code follows conventions · acceptance test passes · committed · no stray arti
 ---
 
 ## TASK LIST
+
+### T0 — Canonical library "vault" (source-of-truth core) — DO BEFORE ADAPTER WAVES
+Makes the app a persistent hub, not a stateless pipe. Orphaned tracks are kept, never dropped.
+- New `ultrasonics/tools/vault.py` (sqlite in `config_dir/vault/vault.db`):
+  ```
+  tracks(canonical_id PK, isrc, upc, title, artists, album, date, image, created, updated)
+  track_links(canonical_id, platform, platform_id, status)   -- status: linked | orphan  · UNIQUE(canonical_id, platform)
+  playlists(canonical_id PK, name, description, image, updated)
+  playlist_tracks(playlist_canonical_id, track_canonical_id, position)
+  ```
+- API: `upsert_track(song) -> canonical_id` (resolve existing by ISRC → any platform_id → fuzzy via `tools/fuzzymatch`, else create); `link(canonical_id, platform, platform_id, status)`; `mark_orphan(canonical_id, platform)`; `get_orphans(platform)`; `upsert_playlist(...)`, `set_membership(...)`.
+- **Adapter contract change:** syncs go **platform → vault → platform**, not adapter→adapter. On import: upsert each song into vault + link its source platform. On export: for each vault track, use its `linked` id for the target platform; if none, run resolution; still nothing → write an `orphan` link for that platform (keep the track).
+- **Migrate** the per-plugin `unmatched` store into `track_links` where `status='orphan'`. The T2 manual-match UI and T1 `matchings` now read/write the vault.
+- Accept: import a Spotify + a Bandcamp playlist → both land in one vault; a Bandcamp-only track with no Spotify match persists as a `tracks` row with a Spotify `orphan` link (not dropped); re-running export after the track becomes findable flips orphan→linked.
 
 ### T1 — `matchings` store + auto-apply (learning loop)
 - New `ultrasonics/tools/matchings.py`: sqlite `matchings(user_key, src_platform, src_id, src_isrc, dst_platform, dst_id, created)`. API: `save(...)`, `lookup(src_platform, src_id, dst_platform)`, `list_unresolved(applet_id)`.
