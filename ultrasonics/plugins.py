@@ -243,16 +243,28 @@ def applet_delete(applet_id):
 def applet_run(applet_id):
     """
     Run the requested applet in full.
+
+    Sync contract (T0 vault):
+      1. Input plugins fetch platform data → songs_dict.
+      2. Each playlist is imported into the vault (upsert_track + link source IDs).
+      3. Modifier plugins transform vault-enriched songs_dict.
+      4. For each output plugin: export_for_platform builds songs_dict with
+         linked platform IDs pre-filled; orphan tracks are written as orphan
+         links and still passed to the adapter so it can attempt a fresh match.
+         If the adapter resolves a previously orphaned track, it should call
+         vault.flip_orphan_to_linked(canonical_id, platform, platform_id).
     """
     from datetime import datetime
     from ultrasonics.tools import history, notifications
     from ultrasonics.tools import unmatched as unmatched_module
+    from ultrasonics.tools import vault
     from ultrasonics.tools.capability_guard import validate_applet, apply_track_limits
 
     runtime = datetime.now()
     history_id = history.record_start(applet_id)
     n_playlists = 0
     n_tracks = 0
+    success = False
 
     log.info(f"Running applet: {applet_id}")
 
@@ -263,43 +275,71 @@ def applet_run(applet_id):
             raise Exception(
                 f"An input or output plugin is missing for applet {applet_id} - will not run.")
 
-        else:
-            # T12: validate capability before running
-            validate_applet(applet_plans)
+        # T12: validate capability before running
+        validate_applet(applet_plans)
 
-            songs_dict = []
+        songs_dict = []
 
-            def get_info(plugin):
-                name = plugin["plugin"]
-                version = plugin["version"]
-                data = plugin["data"]
-                return name, version, data
+        def get_info(plugin):
+            name = plugin["plugin"]
+            version = plugin["version"]
+            data = plugin["data"]
+            return name, version, data
 
-            "Inputs"
-            for plugin in applet_plans["inputs"]:
-                for item in plugin_run(*get_info(plugin), component="inputs", applet_id=applet_id):
-                    songs_dict.append(item)
+        # ── Inputs ─────────────────────────────────────────────────────────
+        for plugin in applet_plans["inputs"]:
+            for item in plugin_run(*get_info(plugin), component="inputs", applet_id=applet_id):
+                songs_dict.append(item)
 
-            "Modifiers"
-            for plugin in applet_plans["modifiers"]:
-                songs_dict = plugin_run(
-                    *get_info(plugin), songs_dict=songs_dict, component="modifiers", applet_id=applet_id)
+        # ── T0: Import into vault ──────────────────────────────────────────
+        # Determine source platform from the first input plugin (best effort).
+        source_platform = None
+        if applet_plans["inputs"]:
+            source_platform = applet_plans["inputs"][0]["plugin"]
 
-            "Outputs"
-            for plugin in applet_plans["outputs"]:
-                # T12: enforce per-adapter track limit before writing
-                output_name = plugin["plugin"]
-                limited_songs_dict = apply_track_limits(songs_dict, output_name)
-                plugin_run(*get_info(plugin), component="outputs",
-                           applet_id=applet_id, songs_dict=limited_songs_dict)
+        vault_playlist_ids = []  # [(playlist_canonical_id, playlist_index)]
+        if source_platform:
+            for idx, playlist_item in enumerate(songs_dict):
+                try:
+                    pl_cid, _ = vault.import_songs_dict(playlist_item, source_platform)
+                    vault_playlist_ids.append((pl_cid, idx))
+                except Exception as ve:
+                    log.warning(f"vault.import_songs_dict failed for '{playlist_item.get('name')}': {ve}")
 
-            n_playlists = len(songs_dict)
-            n_tracks = sum(len(p.get("songs", [])) for p in songs_dict)
-            success = True
+        # ── Modifiers ──────────────────────────────────────────────────────
+        for plugin in applet_plans["modifiers"]:
+            songs_dict = plugin_run(
+                *get_info(plugin), songs_dict=songs_dict, component="modifiers", applet_id=applet_id)
+
+        # ── Outputs ────────────────────────────────────────────────────────
+        for plugin in applet_plans["outputs"]:
+            output_name = plugin["plugin"]
+
+            # Build per-output songs_dict from vault (pre-fills linked IDs, marks orphans)
+            if vault_playlist_ids and source_platform:
+                output_songs_dict = []
+                for pl_cid, idx in vault_playlist_ids:
+                    base = songs_dict[idx]
+                    vault_songs = vault.export_for_platform(pl_cid, output_name)
+                    output_songs_dict.append({
+                        "name": base.get("name", "Untitled"),
+                        "id": base.get("id", {}),
+                        "songs": vault_songs,
+                    })
+            else:
+                output_songs_dict = songs_dict
+
+            # T12: enforce per-adapter track limit
+            limited_songs_dict = apply_track_limits(output_songs_dict, output_name)
+            plugin_run(*get_info(plugin), component="outputs",
+                       applet_id=applet_id, songs_dict=limited_songs_dict)
+
+        n_playlists = len(songs_dict)
+        n_tracks = sum(len(p.get("songs", [])) for p in songs_dict)
+        success = True
 
     except Exception as e:
         log.error(e, exc_info=True)
-
         success = False
 
     if success:
