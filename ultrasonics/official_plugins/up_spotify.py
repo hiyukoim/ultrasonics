@@ -24,7 +24,7 @@ from tqdm import tqdm
 
 from app import _ultrasonics
 from ultrasonics import logs
-from ultrasonics.tools import api_key, fuzzymatch, name_filter
+from ultrasonics.tools import api_key, fuzzymatch, matchings, name_filter
 
 log = logs.create_log(__name__)
 
@@ -711,6 +711,33 @@ def run(settings_dict, **kwargs):
                 if duplicate:
                     continue
 
+                # Check learned matchings store before API search
+                src_platform = None
+                src_id = None
+                song_ids = song.get("id", {})
+                for p in ("navidrome", "deezer", "lastfm", "plex", "csv"):
+                    if p in song_ids:
+                        src_platform = p
+                        src_id = song_ids[p]
+                        break
+                if not src_platform and song_ids:
+                    src_platform = next(iter(song_ids))
+                    src_id = song_ids[src_platform]
+
+                learned_id = None
+                if src_platform and src_id:
+                    learned_id = matchings.lookup(src_platform, src_id, "spotify")
+                if not learned_id and song.get("isrc"):
+                    learned_id = matchings.lookup_by_isrc(song.get("isrc"), "spotify")
+
+                if learned_id:
+                    uri = f"spotify:track:{learned_id}"
+                    if uri in existing_uris:
+                        duplicate_uris.append(uri)
+                    else:
+                        uris.append(uri)
+                    continue
+
                 uri, confidence = s.search(song)
 
                 if uri in existing_uris:
@@ -718,6 +745,15 @@ def run(settings_dict, **kwargs):
 
                 if confidence > float(database.get("fuzzy_ratio") or 90):
                     uris.append(uri)
+                    # Save learned matching
+                    if src_platform and src_id and uri:
+                        sp_track_id = uri.replace("spotify:track:", "")
+                        matchings.save(
+                            src_platform, src_id, "spotify", sp_track_id,
+                            src_isrc=song.get("isrc"),
+                            src_title=song.get("title"),
+                            src_artist="; ".join(song.get("artists", [])),
+                        )
                 else:
                     log.debug(
                         f"Could not find song {song['title']} in Spotify; will not add to playlist."

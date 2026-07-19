@@ -14,7 +14,7 @@ from flask import Flask, redirect, render_template, request
 from flask_socketio import SocketIO, emit, send
 
 from ultrasonics import database, logs, plugins
-from ultrasonics.tools import random_words
+from ultrasonics.tools import history, matchings, random_words, unmatched
 
 log = logs.create_log(__name__)
 
@@ -274,6 +274,85 @@ def html_settings():
 @app.route('/welcome')
 def html_welcome():
     return render_template('welcome.html')
+
+
+@app.route('/unmatched', methods=['GET', 'POST'])
+def html_unmatched():
+    from datetime import datetime
+
+    if request.method == 'POST':
+        action = request.form.get('action')
+        db_path = request.form.get('db_path')
+        rowid = request.form.get('rowid')
+
+        if action == 'dismiss' and db_path and rowid:
+            unmatched.dismiss(db_path, int(rowid))
+        elif action == 'resolve' and db_path and rowid:
+            unmatched.resolve(db_path, int(rowid))
+
+        return redirect('/unmatched')
+
+    items = unmatched.get_all_pending()
+    for item in items:
+        ts = item.get('first_seen')
+        if ts:
+            item['first_seen_fmt'] = datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M')
+        else:
+            item['first_seen_fmt'] = '?'
+
+    return render_template(
+        'unmatched.html',
+        items=items,
+        matchings_count=matchings.count(),
+    )
+
+
+@app.route('/matchings', methods=['GET', 'POST'])
+def html_matchings():
+    if request.method == 'POST':
+        action = request.form.get('action')
+        matching_id = request.form.get('matching_id')
+
+        if action == 'delete' and matching_id:
+            matchings.delete(int(matching_id))
+
+        return redirect('/matchings')
+
+    items = matchings.list_all()
+    return render_template('matchings.html', items=items)
+
+
+@app.route('/history', methods=['GET', 'POST'])
+def html_history():
+    from datetime import datetime
+
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'clear':
+            history.clear()
+        return redirect('/history')
+
+    items = history.get_recent()
+    for item in items:
+        ts = item.get('started')
+        if ts:
+            item['started_fmt'] = datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M')
+        else:
+            item['started_fmt'] = '?'
+        started = item.get('started')
+        finished = item.get('finished')
+        if started and finished:
+            dur = finished - started
+            if dur < 60:
+                item['duration'] = f"{dur}s"
+            else:
+                item['duration'] = f"{dur // 60}m {dur % 60}s"
+        elif started and not finished:
+            item['duration'] = 'running...'
+        else:
+            item['duration'] = '?'
+
+    return render_template('history.html', items=items)
 
 # --- WEBSOCKET ROUTES ---
 

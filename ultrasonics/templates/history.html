@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <title>ultrasonics - run history</title>
+    <meta name="description" content="applet run history">
+
+    <link rel="shortcut icon" href="/static/images/favicon.ico">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.0/css/bulma.min.css">
+    <link rel="stylesheet" type="text/css" href="https://unpkg.com/bulma-prefers-dark">
+    <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&family=Roboto+Mono:wght@400;700&display=swap">
+    <link rel="stylesheet" href="/static/css/custom.css">
+</head>
+
+<body class="has-background-animated">
+    <div class="container">
+        <section class="section">
+            <img src="/static/images/logo.svg">
+
+            <div class="columns">
+                <div class="column">
+                    <a href="/" class="button is-small">&#8592; back</a>
+                </div>
+                <div class="column has-text-centered">
+                    <h2 class="title is-4">run history</h2>
+                </div>
+                <div class="column has-text-right">
+                    {% if items %}
+                    <form method="POST" action="/history" style="display:inline">
+                        <input type="hidden" name="action" value="clear">
+                        <button class="button is-small is-danger is-outlined" type="submit">clear all</button>
+                    </form>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if items %}
+            <table class="table is-fullwidth is-hoverable is-striped">
+                <thead>
+                    <tr>
+                        <th>Applet</th>
+                        <th>Started</th>
+                        <th>Duration</th>
+                        <th>Result</th>
+                        <th>Summary</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in items %}
+                    <tr>
+                        <td><code>{{ item.applet_id[:8] }}</code></td>
+                        <td>{{ item.started_fmt }}</td>
+                        <td>{{ item.duration }}</td>
+                        <td>
+                            {% if item.success == 1 %}
+                            <span class="tag is-success">success</span>
+                            {% elif item.success == 0 %}
+                            <span class="tag is-danger">failed</span>
+                            {% else %}
+                            <span class="tag is-warning">running</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ item.summary or '' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="notification is-info is-light has-text-centered">
+                No run history yet. Applet runs will appear here once they complete.
+            </div>
+            {% endif %}
+        </section>
+
+        <div class="section has-text-centered">
+            <p>
+                <strong>ultrasonics</strong> by <a class="p1" href="https://github.com/XDGFX/ultrasonics">XDGFX</a>.
+                do more with your music.
+            </p>
+        </div>
+    </div>
+</body>
+
+</html>

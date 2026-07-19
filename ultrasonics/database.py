@@ -70,6 +70,16 @@ class Core:
             "label": "Trigger Update Polling Interval (s)",
             "name": "trigger_poll",
             "value": "120"
+        },
+        {
+            "type": "string",
+            "value": "To receive a webhook notification when an applet finishes running, set a URL below. ultrasonics will POST a JSON payload with the run result."
+        },
+        {
+            "type": "text",
+            "label": "Notification Webhook URL (optional)",
+            "name": "notification_url",
+            "value": ""
         }
     ]
 

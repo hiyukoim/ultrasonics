@@ -23,7 +23,7 @@ from tqdm import tqdm
 
 from app import _ultrasonics
 from ultrasonics import logs
-from ultrasonics.tools import fuzzymatch, name_filter
+from ultrasonics.tools import fuzzymatch, matchings, name_filter
 
 log = logs.create_log(__name__)
 
@@ -402,6 +402,18 @@ def run(settings_dict, **kwargs):
                 except KeyError:
                     pass
 
+                # Check learned matchings store
+                src_platform = _detect_src_platform(song)
+                src_id = _get_src_id(song, src_platform)
+                if src_platform and src_id:
+                    learned = matchings.lookup(src_platform, src_id, "navidrome")
+                    if learned:
+                        return learned
+                if song.get("isrc"):
+                    learned = matchings.lookup_by_isrc(song["isrc"], "navidrome")
+                    if learned:
+                        return learned
+
                 # Search the server for a match
                 query_parts = []
                 if song.get("title"):
@@ -429,8 +441,30 @@ def run(settings_dict, **kwargs):
                         best_id = result.get("id")
 
                 if best_score >= fuzzy_ratio and best_id:
+                    # Save learned matching for future runs
+                    if src_platform and src_id:
+                        matchings.save(
+                            src_platform, src_id, "navidrome", best_id,
+                            src_isrc=song.get("isrc"),
+                            src_title=song.get("title"),
+                            src_artist="; ".join(song.get("artists", [])),
+                        )
                     return best_id
                 return None
+
+            def _detect_src_platform(song):
+                ids = song.get("id", {})
+                for platform in ("spotify", "deezer", "lastfm", "plex", "csv"):
+                    if platform in ids:
+                        return platform
+                if ids:
+                    return next(iter(ids))
+                return None
+
+            def _get_src_id(song, platform):
+                if not platform:
+                    return None
+                return song.get("id", {}).get(platform)
 
             # Find songs to add
             song_ids_to_add = []

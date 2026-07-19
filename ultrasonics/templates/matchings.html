@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <title>ultrasonics - learned matchings</title>
+    <meta name="description" content="manage learned matchings">
+
+    <link rel="shortcut icon" href="/static/images/favicon.ico">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.0/css/bulma.min.css">
+    <link rel="stylesheet" type="text/css" href="https://unpkg.com/bulma-prefers-dark">
+    <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&family=Roboto+Mono:wght@400;700&display=swap">
+    <link rel="stylesheet" href="/static/css/custom.css">
+</head>
+
+<body class="has-background-animated">
+    <div class="container">
+        <section class="section">
+            <img src="/static/images/logo.svg">
+
+            <div class="columns">
+                <div class="column">
+                    <a href="/unmatched" class="button is-small">&#8592; unmatched tracks</a>
+                </div>
+                <div class="column has-text-centered">
+                    <h2 class="title is-4">learned matchings</h2>
+                    <p class="subtitle is-6">{{ items | length }} stored</p>
+                </div>
+                <div class="column"></div>
+            </div>
+
+            {% if items %}
+            <table class="table is-fullwidth is-hoverable is-striped">
+                <thead>
+                    <tr>
+                        <th>Source</th>
+                        <th>Track</th>
+                        <th>Artist</th>
+                        <th>Destination</th>
+                        <th>Dest ID</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in items %}
+                    <tr>
+                        <td><span class="tag is-link is-light">{{ item.src_platform }}</span>
+                            <small>{{ item.src_id or '' }}</small>
+                        </td>
+                        <td>{{ item.src_title or '?' }}</td>
+                        <td>{{ item.src_artist or '?' }}</td>
+                        <td><span class="tag is-primary is-light">{{ item.dst_platform }}</span></td>
+                        <td><code>{{ item.dst_id }}</code></td>
+                        <td>
+                            <form method="POST" action="/matchings" style="display:inline">
+                                <input type="hidden" name="action" value="delete">
+                                <input type="hidden" name="matching_id" value="{{ item.id }}">
+                                <button class="button is-small is-danger" type="submit"
+                                    title="Delete this matching">&#10005;</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="notification is-info is-light has-text-centered">
+                No learned matchings yet. They will be saved automatically as songs are matched during runs.
+            </div>
+            {% endif %}
+        </section>
+
+        <div class="section has-text-centered">
+            <p>
+                <strong>ultrasonics</strong> by <a class="p1" href="https://github.com/XDGFX/ultrasonics">XDGFX</a>.
+                do more with your music.
+            </p>
+        </div>
+    </div>
+</body>
+
+</html>

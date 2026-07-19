@@ -245,8 +245,10 @@ def applet_run(applet_id):
     Run the requested applet in full.
     """
     from datetime import datetime
+    from ultrasonics.tools import history, notifications
 
     runtime = datetime.now()
+    history_id = history.record_start(applet_id)
 
     log.info(f"Running applet: {applet_id}")
 
@@ -293,11 +295,17 @@ def applet_run(applet_id):
         success = False
 
     if success:
+        duration = str(datetime.now() - runtime)
         log.info(
-            f"Applet {applet_id} completed successfully in {datetime.now() - runtime}")
+            f"Applet {applet_id} completed successfully in {duration}")
+        history.record_finish(history_id, True, summary=f"Completed in {duration}")
+        notifications.send_run_notification(applet_id, True, f"Completed in {duration}")
     else:
+        duration = str(datetime.now() - runtime)
         log.warning(
-            f"Applet {applet_id} failed in {datetime.now() - runtime}")
+            f"Applet {applet_id} failed in {duration}")
+        history.record_finish(history_id, False, summary=f"Failed after {duration}")
+        notifications.send_run_notification(applet_id, False, f"Failed after {duration}")
 
     lastrun = {
         "time": runtime.strftime("%d-%m-%Y %H:%M"),
