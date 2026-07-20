@@ -10,14 +10,27 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap">
     <link rel="stylesheet" href="/static/css/custom.css">
     <style>
-        .link-badge { display:inline-block; padding:2px 6px; border-radius:3px; font-size:.7rem; margin-right:3px; }
-        .link-linked { background:var(--primary-1); color:#111; }
-        .link-orphan { background:var(--primary-2); color:#111; }
-        .link-none   { background:var(--grey-dark);  color:#fff; }
-        .track-image { width:36px; height:36px; object-fit:cover; border-radius:3px; }
+        .link-badge         { display:inline-block; padding:2px 6px; border-radius:3px; font-size:.7rem; margin-right:3px; }
+        .link-linked        { background:var(--primary-1); color:#111; }
+        .link-orphan        { background:var(--primary-2); color:#111; }
+        .link-none          { background:var(--grey-dark); color:#fff; }
+        .track-image        { width:36px; height:36px; object-fit:cover; border-radius:3px; }
         .track-image-placeholder { width:36px; height:36px; background:var(--grey-dark); border-radius:3px; display:inline-block; }
         table.tracks-table td { vertical-align:middle; }
-        .push-form select, .push-form .button { height:2.2em; }
+
+        /* star button */
+        .star-btn        { background:none; border:none; cursor:pointer; font-size:1.3rem; padding:0; opacity:.3; }
+        .star-btn.is-main{ opacity:1; color:#f5c842; }
+
+        /* tag pills in edit mode */
+        .tag-input-row   { display:flex; flex-wrap:wrap; gap:.3rem; align-items:center; }
+        #tags-edit-box   { max-width:240px; }
+
+        /* group members */
+        .group-member     { border:1px solid var(--grey-dark); border-radius:4px; padding:.5rem .75rem;
+                            display:flex; align-items:center; justify-content:space-between; }
+        .group-member.is-main-entry { border-color:var(--primary-1); }
+        .group-member + .group-member { margin-top:.4rem; }
     </style>
 </head>
 <body class="has-background-animated">
@@ -25,40 +38,147 @@
     <section class="section">
         <img src="/static/images/logo.svg">
 
+        <!-- header -->
         <div class="columns is-vcentered mb-2">
             <div class="column">
                 <a href="/vault" class="button is-small">&#8592; vault</a>
             </div>
             <div class="column has-text-centered">
-                <h2 class="title is-4">{{ pl.name }}</h2>
-                {% if pl.description %}<p class="subtitle is-6">{{ pl.description }}</p>{% endif %}
+                <!-- star + title -->
+                <form method="POST" action="/vault/playlist/{{ pl.canonical_id }}" style="display:inline">
+                    <input type="hidden" name="action" value="set_main">
+                    <input type="hidden" name="is_main" value="{{ '0' if pl.is_main else '1' }}">
+                    <button type="submit" class="star-btn {{ 'is-main' if pl.is_main else '' }}"
+                            title="{{ 'Unmark as main' if pl.is_main else 'Mark as source of truth' }}">&#9733;</button>
+                </form>
+                <span class="title is-4 ml-1">{{ pl.name }}</span>
+                {% if pl.is_main %}
+                <span class="tag is-small ml-2" style="background:var(--primary-1);color:#111;">main</span>
+                {% endif %}
+                {% if pl.description %}
+                <p class="subtitle is-6 mt-1">{{ pl.description }}</p>
+                {% endif %}
             </div>
             <div class="column has-text-right">
                 <form method="POST" action="/vault/playlist/{{ pl.canonical_id }}" style="display:inline">
                     <input type="hidden" name="action" value="delete">
                     <button class="button is-small is-danger is-outlined" type="submit"
-                        onclick="return confirm('Delete this playlist from the vault? Tracks are kept.')">
-                        delete
-                    </button>
+                        onclick="return confirm('Delete this playlist from the vault? Tracks are kept.')">delete</button>
                 </form>
             </div>
         </div>
 
-        <!-- Platform links row -->
+        <!-- tags row -->
         <div class="mb-3">
-            <span class="is-size-7 has-text-grey">on platforms: </span>
-            {% for p in pl.platforms %}
-            <span class="tag is-small">{{ p.platform }}{% if p.platform_id %} · {{ p.platform_id[:12] }}{% endif %}</span>
+            <span class="is-size-7 has-text-grey">tags:</span>
+            {% for tag in pl.tags %}
+            <span class="tag is-small ml-1">{{ tag }}</span>
             {% else %}
-            <span class="is-size-7 has-text-grey">none linked yet</span>
+            <span class="is-size-7 has-text-grey ml-1">none</span>
+            {% endfor %}
+            <a class="is-size-7 ml-2 p1" onclick="document.getElementById('tag-editor').classList.toggle('is-hidden')"
+               style="cursor:pointer">edit tags</a>
+        </div>
+
+        <!-- tag editor (collapsed) -->
+        <div id="tag-editor" class="box is-hidden mb-3">
+            <form method="POST" action="/vault/playlist/{{ pl.canonical_id }}">
+                <input type="hidden" name="action" value="set_tags">
+                <div class="field">
+                    <label class="label is-small">Tags (comma-separated)</label>
+                    <div class="control">
+                        <input class="input is-small" type="text" name="tags_csv"
+                               id="tags-edit-box"
+                               value="{{ pl.tags | join(', ') }}"
+                               placeholder="e.g. workout, electronic, 2024">
+                    </div>
+                </div>
+                <button class="button is-small" type="submit">save tags</button>
+            </form>
+        </div>
+
+        <!-- platform links -->
+        <div class="mb-3">
+            <span class="is-size-7 has-text-grey">platforms:</span>
+            {% for p in pl.platforms %}
+            <span class="tag is-small ml-1">{{ p.platform }}{% if p.platform_id %} · <code>{{ p.platform_id[:14] }}</code>{% endif %}</span>
+            {% else %}
+            <span class="is-size-7 has-text-grey ml-1">none linked yet</span>
             {% endfor %}
         </div>
 
-        <!-- Push to platform -->
+        <!-- group members -->
+        {% if group %}
         <div class="box mb-4">
-            <p class="is-size-7 mb-2"><strong>push to platform</strong> — exports this playlist to a target platform.
-            Tracks without a resolved ID on that platform are flagged as orphans and can be manually matched.</p>
-            <form method="POST" action="/vault/playlist/{{ pl.canonical_id }}" class="push-form">
+            <p class="is-size-7 mb-2"><strong>playlist group</strong> — {{ group.members | length }} version(s) of this playlist across platforms.</p>
+            {% for m in group.members %}
+            <div class="group-member {{ 'is-main-entry' if m.is_main else '' }}">
+                <span>
+                    {% if m.is_main %}<span class="mr-1" style="color:#f5c842">&#9733;</span>{% endif %}
+                    <a href="/vault/playlist/{{ m.canonical_id }}" class="{{ 'p1' if m.canonical_id == pl.canonical_id else '' }}">
+                        {{ m.name }}
+                    </a>
+                    <span class="is-size-7 has-text-grey ml-1">{{ m.role }}</span>
+                    {% for p in m.platforms %}
+                    <span class="tag is-small ml-1">{{ p }}</span>
+                    {% endfor %}
+                </span>
+                {% if not m.is_main and m.canonical_id != pl.canonical_id %}
+                <form method="POST" action="/vault/playlist/{{ m.canonical_id }}" style="display:inline">
+                    <input type="hidden" name="action" value="set_main">
+                    <input type="hidden" name="is_main" value="1">
+                    <button class="button is-small is-outlined" type="submit">make main</button>
+                </form>
+                {% endif %}
+            </div>
+            {% endfor %}
+            <div class="mt-3">
+                {% if pl.is_main %}
+                <a class="button is-small is-outlined" href="/vault/playlist/{{ pl.canonical_id }}?push_group=1"
+                   onclick="return confirm('Push this main playlist to all group copies?')">
+                    sync all copies from this main &#8594;
+                </a>
+                {% endif %}
+                <form method="POST" action="/vault/playlist/{{ pl.canonical_id }}" style="display:inline" class="ml-2">
+                    <input type="hidden" name="action" value="ungroup">
+                    <button class="button is-small is-outlined is-danger" type="submit"
+                            onclick="return confirm('Remove this playlist from the group?')">ungroup</button>
+                </form>
+            </div>
+        </div>
+        {% else %}
+        <!-- group playlist with another -->
+        <div class="mb-3">
+            <a class="is-size-7 p1" onclick="document.getElementById('group-editor').classList.toggle('is-hidden')"
+               style="cursor:pointer">link as duplicate of another playlist</a>
+            <div id="group-editor" class="box mt-2 is-hidden">
+                <form method="POST" action="/vault/playlist/{{ pl.canonical_id }}">
+                    <input type="hidden" name="action" value="group">
+                    <div class="field">
+                        <label class="label is-small">Paste the canonical_id of the other playlist</label>
+                        <div class="control">
+                            <input class="input is-small" type="text" name="other_id"
+                                   placeholder="xxxxxxxx-xxxx-xxxx-...">
+                        </div>
+                    </div>
+                    <label class="checkbox is-size-7">
+                        <input type="checkbox" name="make_main" value="1"> Make THIS playlist the main
+                    </label>
+                    <div class="mt-2">
+                        <button class="button is-small" type="submit">link</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- push to platform -->
+        <div class="box mb-4">
+            <p class="is-size-7 mb-2">
+                <strong>push to platform</strong> — exports this playlist to a target platform.
+                Tracks without a resolved ID are flagged as orphans.
+            </p>
+            <form method="POST" action="/vault/playlist/{{ pl.canonical_id }}">
                 <input type="hidden" name="action" value="push">
                 <div class="field has-addons">
                     <div class="control is-expanded">
@@ -80,14 +200,13 @@
             {% endif %}
         </div>
 
-        <!-- Track list -->
+        <!-- track list -->
         <p class="is-size-7 has-text-grey mb-2">{{ tracks | length }} tracks</p>
-
         {% if tracks %}
         <table class="table is-fullwidth is-striped is-hoverable tracks-table">
             <thead>
                 <tr>
-                    <th style="width:44px">#</th>
+                    <th style="width:38px">#</th>
                     <th style="width:44px"></th>
                     <th>Title</th>
                     <th>Artist</th>
@@ -113,7 +232,8 @@
                     <td class="is-size-7"><code>{{ t.isrc or '' }}</code></td>
                     <td>
                         {% for lnk in t.links %}
-                        <span class="link-badge link-{{ lnk.status }}" title="{{ lnk.platform_id or 'no id' }}">
+                        <span class="link-badge link-{{ lnk.status }}"
+                              title="{{ lnk.platform_id or 'no id' }}{% if lnk.run_id %} · run {{ lnk.run_id[:8] }}{% endif %}">
                             {{ lnk.platform }}
                         </span>
                         {% endfor %}

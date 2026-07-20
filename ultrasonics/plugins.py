@@ -320,7 +320,7 @@ def applet_run(applet_id):
                 output_songs_dict = []
                 for pl_cid, idx in vault_playlist_ids:
                     base = songs_dict[idx]
-                    vault_songs = vault.export_for_platform(pl_cid, output_name)
+                    vault_songs = vault.export_for_platform(pl_cid, output_name, run_id=history_id)
                     output_songs_dict.append({
                         "name": base.get("name", "Untitled"),
                         "id": base.get("id", {}),

@@ -417,57 +417,92 @@ def html_history():
 @app.route('/vault')
 def html_vault():
     try:
-        playlists = vault.list_playlists()
-        vstats = vault.stats()
+        tag       = request.args.get('tag', '').strip() or None
+        main_only = request.args.get('main_only', '') == '1'
+        playlists = vault.list_playlists(tag=tag, main_only=main_only)
+        vstats    = vault.stats()
+        # Collect all tags from all playlists for the filter bar
+        tag_counts = {}
+        for pl in vault.list_playlists():
+            for t in pl.get('tags', []):
+                tag_counts[t] = tag_counts.get(t, 0) + 1
+        all_tags = sorted(tag_counts, key=lambda t: -tag_counts[t])
     except Exception as exc:
         log.warning(f"vault: error loading dashboard: {exc}")
         playlists = []
-        vstats = {"tracks": 0, "playlists": 0, "links_orphan": 0}
-    return render_template('vault.html', playlists=playlists, stats=vstats)
+        vstats    = {"tracks": 0, "playlists": 0, "links_orphan": 0}
+        all_tags  = []
+    return render_template('vault.html', playlists=playlists, stats=vstats, all_tags=all_tags)
 
 
 @app.route('/vault/playlist/<pid>', methods=['GET', 'POST'])
 def html_vault_playlist(pid):
     if request.method == 'POST':
         action = request.form.get('action')
+
         if action == 'delete':
             vault.delete_playlist(pid)
             return redirect('/vault')
+
+        if action == 'set_main':
+            is_main = request.form.get('is_main', '0') == '1'
+            vault.set_main(pid, is_main)
+            return redirect(f'/vault/playlist/{pid}')
+
+        if action == 'set_tags':
+            raw = request.form.get('tags_csv', '')
+            tags = [t.strip() for t in raw.split(',') if t.strip()]
+            vault.set_tags(pid, tags)
+            return redirect(f'/vault/playlist/{pid}')
+
+        if action == 'group':
+            other_id  = request.form.get('other_id', '').strip()
+            make_main = request.form.get('make_main') == '1'
+            if other_id:
+                main_id = pid if make_main else None
+                vault.group_playlists([pid, other_id], main_id=main_id)
+            return redirect(f'/vault/playlist/{pid}')
+
+        if action == 'ungroup':
+            vault.ungroup_playlist(pid)
+            return redirect(f'/vault/playlist/{pid}')
+
         if action == 'push':
             target = request.form.get('target_platform', '').strip()
             if not target:
                 return redirect(f'/vault/playlist/{pid}')
-            # Build a synthetic songs_dict from the vault and dispatch via the
-            # matching output plugin if configured, otherwise just report what
-            # would be exported.
             try:
-                pl = vault.get_playlist(pid)
                 songs_for_platform = vault.export_for_platform(pid, target)
                 n_linked = sum(1 for s in songs_for_platform if s.get("id", {}).get(target))
                 n_orphan = len(songs_for_platform) - n_linked
-                msg = f"Push queued: {n_linked} tracks ready, {n_orphan} orphan on {target}."
+                msg = f"Export ready: {n_linked} tracks linked, {n_orphan} orphan on {target}."
             except Exception as exc:
                 msg = f"Push error: {exc}"
-            return render_template(
-                'vault_playlist.html',
-                pl=vault.get_playlist(pid),
-                tracks=vault.get_playlist_tracks_with_links(pid),
-                msg=msg,
-                known_platforms=_KNOWN_PLATFORMS,
-            )
+            pl     = vault.get_playlist(pid)
+            tracks = vault.get_playlist_tracks_with_links(pid)
+            group  = vault.get_group(pid)
+            return render_template('vault_playlist.html', pl=pl, tracks=tracks,
+                                   msg=msg, known_platforms=_KNOWN_PLATFORMS, group=group)
+
         return redirect(f'/vault/playlist/{pid}')
+
+    # handle ?push_group=1 (sync main to all group copies — informational for now)
+    msg = None
+    if request.args.get('push_group') == '1':
+        group = vault.get_group(pid)
+        if group:
+            n_copies = sum(1 for m in group['members'] if m['role'] == 'copy')
+            msg = f"Group sync queued for {n_copies} copy playlist(s) — run an applet with vault as input to push."
+        else:
+            msg = "This playlist is not in a group."
 
     pl = vault.get_playlist(pid)
     if not pl:
         return "Playlist not found", 404
     tracks = vault.get_playlist_tracks_with_links(pid)
-    return render_template(
-        'vault_playlist.html',
-        pl=pl,
-        tracks=tracks,
-        msg=None,
-        known_platforms=_KNOWN_PLATFORMS,
-    )
+    group  = vault.get_group(pid)
+    return render_template('vault_playlist.html', pl=pl, tracks=tracks,
+                           msg=msg, known_platforms=_KNOWN_PLATFORMS, group=group)
 
 
 @app.route('/vault/export')
@@ -505,18 +540,6 @@ _KNOWN_PLATFORMS = [
     "spotify", "navidrome", "soundcloud", "youtube", "ytmusic",
     "apple music", "bandcamp", "deezer", "tidal", "qobuz",
 ]
-
-
-@app.route('/apple_music/auth/request', methods=['GET'])
-def html_apple_music_auth():
-    """
-    Renders a page that loads MusicKit JS, authorises the user, and displays
-    the resulting user music token for manual copy-paste back into the plugin settings.
-    The developer token is built server-side from the configured credentials.
-    """
-    # Try to find an applet with Apple Music configured to pull dev token
-    dev_token = request.args.get('dev_token', '')
-    return render_template('apple_music_auth.html', dev_token=dev_token)
 
 
 # --- WEBSOCKET ROUTES ---

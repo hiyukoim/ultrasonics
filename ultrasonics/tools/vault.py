@@ -8,10 +8,11 @@ playlists across all platforms.
 Schema
 ------
 tracks(canonical_id, isrc, upc, title, artists_json, album, date, image, created, updated)
-track_links(canonical_id, platform, platform_id, status)  -- linked | orphan
-playlists(canonical_id, name, description, image, updated)
+track_links(canonical_id, platform, platform_id, status, updated, run_id)  -- linked | orphan
+playlists(canonical_id, name, description, image, is_main, tags_json, updated)
 playlist_links(canonical_id, platform, platform_id)       -- playlist platform IDs
 playlist_tracks(playlist_canonical_id, track_canonical_id, position)
+playlist_groups(group_id, playlist_canonical_id, role)    -- role: main | copy
 
 Sync contract
 -------------
@@ -72,6 +73,7 @@ def _ensure_schema(conn):
             platform_id  TEXT,
             status       TEXT NOT NULL CHECK(status IN ('linked','orphan')),
             updated      INTEGER NOT NULL,
+            run_id       TEXT,
             PRIMARY KEY (canonical_id, platform),
             FOREIGN KEY (canonical_id) REFERENCES tracks(canonical_id) ON DELETE CASCADE
         );
@@ -81,7 +83,17 @@ def _ensure_schema(conn):
             name         TEXT NOT NULL,
             description  TEXT,
             image        TEXT,
+            is_main      INTEGER NOT NULL DEFAULT 0,
+            tags_json    TEXT NOT NULL DEFAULT '[]',
             updated      INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS playlist_groups (
+            group_id              TEXT NOT NULL,
+            playlist_canonical_id TEXT NOT NULL,
+            role                  TEXT NOT NULL DEFAULT 'copy',
+            PRIMARY KEY (group_id, playlist_canonical_id),
+            FOREIGN KEY (playlist_canonical_id) REFERENCES playlists(canonical_id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS playlist_links (
@@ -101,16 +113,48 @@ def _ensure_schema(conn):
             FOREIGN KEY (track_canonical_id)    REFERENCES tracks(canonical_id)    ON DELETE CASCADE
         );
 
-        CREATE INDEX IF NOT EXISTS idx_tl_platform ON track_links(platform, platform_id);
-        CREATE INDEX IF NOT EXISTS idx_tl_status   ON track_links(platform, status);
-        CREATE INDEX IF NOT EXISTS idx_tracks_isrc ON tracks(isrc);
-        CREATE INDEX IF NOT EXISTS idx_pl_links    ON playlist_links(platform, platform_id);
-        CREATE INDEX IF NOT EXISTS idx_pt_playlist ON playlist_tracks(playlist_canonical_id, position);
+        CREATE INDEX IF NOT EXISTS idx_tl_platform  ON track_links(platform, platform_id);
+        CREATE INDEX IF NOT EXISTS idx_tl_status    ON track_links(platform, status);
+        CREATE INDEX IF NOT EXISTS idx_tl_run_id    ON track_links(run_id);
+        CREATE INDEX IF NOT EXISTS idx_tracks_isrc  ON tracks(isrc);
+        CREATE INDEX IF NOT EXISTS idx_pl_links     ON playlist_links(platform, platform_id);
+        CREATE INDEX IF NOT EXISTS idx_pt_playlist  ON playlist_tracks(playlist_canonical_id, position);
+        CREATE INDEX IF NOT EXISTS idx_pg_group     ON playlist_groups(group_id);
+        CREATE INDEX IF NOT EXISTS idx_pg_playlist  ON playlist_groups(playlist_canonical_id);
     """)
+
+    # Additive migrations for databases created before this schema version
+    _add_column_if_missing(conn, "track_links", "run_id", "TEXT")
+    _add_column_if_missing(conn, "playlists",   "is_main",   "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "playlists",   "tags_json", "TEXT NOT NULL DEFAULT '[]'")
+    _create_table_if_missing(conn, "playlist_groups",
+        """CREATE TABLE playlist_groups (
+               group_id              TEXT NOT NULL,
+               playlist_canonical_id TEXT NOT NULL,
+               role                  TEXT NOT NULL DEFAULT 'copy',
+               PRIMARY KEY (group_id, playlist_canonical_id),
+               FOREIGN KEY (playlist_canonical_id)
+                   REFERENCES playlists(canonical_id) ON DELETE CASCADE
+           )""")
+    conn.commit()
     conn.commit()
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _add_column_if_missing(conn, table, column, definition):
+    existing = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _create_table_if_missing(conn, table, create_sql):
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    if not exists:
+        conn.execute(create_sql)
+
 
 def _song_to_row(song):
     isrc = song.get("isrc") or None
@@ -225,29 +269,31 @@ def upsert_track(song):
     return canonical_id
 
 
-def link(canonical_id, platform, platform_id, status="linked"):
+def link(canonical_id, platform, platform_id, status="linked", run_id=None):
     """
     Upsert a track_links row.
     status must be 'linked' or 'orphan'.
     platform_id may be None for orphan links.
+    run_id (optional) — history run ID for traceability.
     """
     conn = _get_db()
     now = int(time.time())
     conn.execute(
-        """INSERT INTO track_links (canonical_id, platform, platform_id, status, updated)
-           VALUES (?, ?, ?, ?, ?)
+        """INSERT INTO track_links (canonical_id, platform, platform_id, status, updated, run_id)
+           VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(canonical_id, platform)
            DO UPDATE SET platform_id = COALESCE(excluded.platform_id, platform_id),
                          status      = excluded.status,
-                         updated     = excluded.updated""",
-        (canonical_id, platform, str(platform_id) if platform_id is not None else None, status, now),
+                         updated     = excluded.updated,
+                         run_id      = COALESCE(excluded.run_id, run_id)""",
+        (canonical_id, platform, str(platform_id) if platform_id is not None else None, status, now, run_id),
     )
     conn.commit()
 
 
-def mark_orphan(canonical_id, platform):
+def mark_orphan(canonical_id, platform, run_id=None):
     """Mark (or create) a track_links entry as orphan for this platform."""
-    link(canonical_id, platform, None, "orphan")
+    link(canonical_id, platform, None, "orphan", run_id=run_id)
 
 
 def get_orphans(platform):
@@ -283,6 +329,137 @@ def get_link(canonical_id, platform):
         (canonical_id, platform),
     ).fetchone()
     return dict(row) if row else None
+
+
+# ── Playlist metadata helpers ─────────────────────────────────────────────────
+
+def set_tags(playlist_canonical_id, tags):
+    """Replace the tags list on a playlist. tags must be a list of strings."""
+    conn = _get_db()
+    conn.execute(
+        "UPDATE playlists SET tags_json = ?, updated = ? WHERE canonical_id = ?",
+        (json.dumps([t.strip() for t in tags if t.strip()], ensure_ascii=False),
+         int(time.time()), playlist_canonical_id),
+    )
+    conn.commit()
+
+
+def set_main(playlist_canonical_id, is_main):
+    """
+    Toggle the is_main flag on a playlist.
+    When setting is_main=True, clears the flag on all group-siblings first
+    so exactly one playlist per group is the main.
+    """
+    conn = _get_db()
+    now = int(time.time())
+    if is_main:
+        group_row = conn.execute(
+            "SELECT group_id FROM playlist_groups WHERE playlist_canonical_id = ?",
+            (playlist_canonical_id,),
+        ).fetchone()
+        if group_row:
+            siblings = conn.execute(
+                "SELECT playlist_canonical_id FROM playlist_groups WHERE group_id = ? AND playlist_canonical_id != ?",
+                (group_row["group_id"], playlist_canonical_id),
+            ).fetchall()
+            for s in siblings:
+                conn.execute(
+                    "UPDATE playlists SET is_main = 0, updated = ? WHERE canonical_id = ?",
+                    (now, s["playlist_canonical_id"]),
+                )
+            conn.execute(
+                "UPDATE playlist_groups SET role = 'copy' WHERE group_id = ? AND playlist_canonical_id != ?",
+                (group_row["group_id"], playlist_canonical_id),
+            )
+            conn.execute(
+                "UPDATE playlist_groups SET role = 'main' WHERE group_id = ? AND playlist_canonical_id = ?",
+                (group_row["group_id"], playlist_canonical_id),
+            )
+    conn.execute(
+        "UPDATE playlists SET is_main = ?, updated = ? WHERE canonical_id = ?",
+        (1 if is_main else 0, now, playlist_canonical_id),
+    )
+    conn.commit()
+
+
+def group_playlists(playlist_ids, main_id=None):
+    """
+    Link multiple playlist canonical_ids into a group.
+    If main_id is given, it is marked as the main; others are copies.
+    Returns group_id.
+    """
+    conn = _get_db()
+    # Check if any already belong to a group (reuse existing group_id)
+    existing = conn.execute(
+        "SELECT group_id FROM playlist_groups WHERE playlist_canonical_id IN ({})".format(
+            ",".join("?" * len(playlist_ids))
+        ),
+        playlist_ids,
+    ).fetchone()
+    group_id = existing["group_id"] if existing else str(uuid.uuid4())
+
+    now = int(time.time())
+    for pid in playlist_ids:
+        role = "main" if pid == main_id else "copy"
+        conn.execute(
+            "INSERT OR REPLACE INTO playlist_groups (group_id, playlist_canonical_id, role) VALUES (?,?,?)",
+            (group_id, pid, role),
+        )
+        if main_id:
+            conn.execute(
+                "UPDATE playlists SET is_main = ?, updated = ? WHERE canonical_id = ?",
+                (1 if pid == main_id else 0, now, pid),
+            )
+    conn.commit()
+    return group_id
+
+
+def get_group(playlist_canonical_id):
+    """
+    Return group info for a playlist, or None if not in any group.
+    Returns {group_id, members: [{canonical_id, name, is_main, role, platforms}]}.
+    """
+    conn = _get_db()
+    row = conn.execute(
+        "SELECT group_id FROM playlist_groups WHERE playlist_canonical_id = ?",
+        (playlist_canonical_id,),
+    ).fetchone()
+    if not row:
+        return None
+    group_id = row["group_id"]
+    members = conn.execute(
+        """SELECT p.canonical_id, p.name, p.is_main, pg.role
+           FROM playlist_groups pg
+           JOIN playlists p ON p.canonical_id = pg.playlist_canonical_id
+           WHERE pg.group_id = ?""",
+        (group_id,),
+    ).fetchall()
+    result = []
+    for m in members:
+        platforms = [
+            lr["platform"]
+            for lr in conn.execute(
+                "SELECT platform FROM playlist_links WHERE canonical_id = ?", (m["canonical_id"],)
+            ).fetchall()
+        ]
+        result.append({
+            "canonical_id": m["canonical_id"],
+            "name": m["name"],
+            "is_main": bool(m["is_main"]),
+            "role": m["role"],
+            "platforms": platforms,
+        })
+    return {"group_id": group_id, "members": result}
+
+
+def ungroup_playlist(playlist_canonical_id):
+    """Remove a playlist from its group (if any)."""
+    conn = _get_db()
+    conn.execute(
+        "DELETE FROM playlist_groups WHERE playlist_canonical_id = ?",
+        (playlist_canonical_id,),
+    )
+    conn.commit()
 
 
 def upsert_playlist(name, platform=None, platform_id=None, description=None, image=None):
@@ -436,7 +613,7 @@ def import_songs_dict(songs_dict_item, source_platform):
     return playlist_cid, track_cids
 
 
-def export_for_platform(playlist_canonical_id, target_platform):
+def export_for_platform(playlist_canonical_id, target_platform, run_id=None):
     """
     Build a songs_dict-style list for `target_platform`.
 
@@ -471,7 +648,7 @@ def export_for_platform(playlist_canonical_id, target_platform):
             if tl["status"] == "linked" and tl["platform_id"]:
                 song["id"][target_platform] = tl["platform_id"]
         else:
-            mark_orphan(cid, target_platform)
+            mark_orphan(cid, target_platform, run_id=run_id)
 
         # Attach other linked IDs to aid downstream matching
         other_links = conn.execute(
@@ -543,20 +720,28 @@ def migrate_unmatched_stores():
     return migrated
 
 
-def list_playlists():
-    """Return all playlists with track counts and platform link info."""
+def list_playlists(tag=None, main_only=False):
+    """Return all playlists ordered by: main first, then updated DESC.
+    Optionally filter by tag or restrict to main-only."""
     conn = _get_db()
     rows = conn.execute(
-        """SELECT p.canonical_id, p.name, p.description, p.image, p.updated,
+        """SELECT p.canonical_id, p.name, p.description, p.image,
+                  p.is_main, p.tags_json, p.updated,
                   COUNT(pt.track_canonical_id) AS track_count
            FROM playlists p
            LEFT JOIN playlist_tracks pt ON pt.playlist_canonical_id = p.canonical_id
            GROUP BY p.canonical_id
-           ORDER BY p.updated DESC"""
+           ORDER BY p.is_main DESC, p.updated DESC"""
     ).fetchall()
     result = []
     for r in rows:
+        tags = json.loads(r["tags_json"] or "[]")
+        if tag and tag not in tags:
+            continue
+        if main_only and not r["is_main"]:
+            continue
         pl = dict(r)
+        pl["tags"] = tags
         pl["platforms"] = [
             lr["platform"]
             for lr in conn.execute(
@@ -564,20 +749,35 @@ def list_playlists():
                 (r["canonical_id"],),
             ).fetchall()
         ]
+        group_row = conn.execute(
+            "SELECT group_id FROM playlist_groups WHERE playlist_canonical_id = ?",
+            (r["canonical_id"],),
+        ).fetchone()
+        pl["group_id"] = group_row["group_id"] if group_row else None
+        pl["group_size"] = (
+            conn.execute(
+                "SELECT COUNT(*) FROM playlist_groups WHERE group_id = ?",
+                (group_row["group_id"],),
+            ).fetchone()[0]
+            if group_row else 1
+        )
         result.append(pl)
     return result
 
 
 def get_playlist(playlist_canonical_id):
-    """Return a single playlist row with platform links, or None."""
+    """Return a single playlist row with platform links and tags, or None."""
     conn = _get_db()
     row = conn.execute(
-        "SELECT canonical_id, name, description, image, updated FROM playlists WHERE canonical_id = ?",
+        """SELECT canonical_id, name, description, image,
+                  is_main, tags_json, updated
+           FROM playlists WHERE canonical_id = ?""",
         (playlist_canonical_id,),
     ).fetchone()
     if not row:
         return None
     pl = dict(row)
+    pl["tags"] = json.loads(row["tags_json"] or "[]")
     pl["platforms"] = [
         dict(lr)
         for lr in conn.execute(
@@ -626,8 +826,9 @@ def get_playlist_tracks_with_links(playlist_canonical_id):
 
 
 def delete_playlist(playlist_canonical_id):
-    """Remove a playlist and its membership rows from the vault (tracks are kept)."""
+    """Remove a playlist and its membership/group rows (tracks kept)."""
     conn = _get_db()
+    conn.execute("DELETE FROM playlist_groups WHERE playlist_canonical_id = ?", (playlist_canonical_id,))
     conn.execute("DELETE FROM playlist_tracks WHERE playlist_canonical_id = ?", (playlist_canonical_id,))
     conn.execute("DELETE FROM playlist_links WHERE canonical_id = ?", (playlist_canonical_id,))
     conn.execute("DELETE FROM playlists WHERE canonical_id = ?", (playlist_canonical_id,))
@@ -645,7 +846,8 @@ def dump_json():
         "track_links": [dict(r) for r in conn.execute("SELECT * FROM track_links").fetchall()],
         "playlists": [dict(r) for r in conn.execute("SELECT * FROM playlists").fetchall()],
         "playlist_links": [dict(r) for r in conn.execute("SELECT * FROM playlist_links").fetchall()],
-        "playlist_tracks": [dict(r) for r in conn.execute("SELECT * FROM playlist_tracks").fetchall()],
+        "playlist_groups":  [dict(r) for r in conn.execute("SELECT * FROM playlist_groups").fetchall()],
+        "playlist_tracks":  [dict(r) for r in conn.execute("SELECT * FROM playlist_tracks").fetchall()],
     }
 
 
@@ -671,26 +873,36 @@ def restore_json(data):
         )
     for r in data.get("track_links", []):
         conn.execute(
-            """INSERT INTO track_links (canonical_id,platform,platform_id,status,updated)
-               VALUES (?,?,?,?,?)
+            """INSERT INTO track_links (canonical_id,platform,platform_id,status,updated,run_id)
+               VALUES (?,?,?,?,?,?)
                ON CONFLICT(canonical_id,platform) DO UPDATE SET
                  platform_id=COALESCE(excluded.platform_id,platform_id),
-                 status=excluded.status, updated=excluded.updated""",
-            (r["canonical_id"], r["platform"], r.get("platform_id"), r["status"], r.get("updated", now)),
+                 status=excluded.status, updated=excluded.updated,
+                 run_id=COALESCE(excluded.run_id,run_id)""",
+            (r["canonical_id"], r["platform"], r.get("platform_id"), r["status"],
+             r.get("updated", now), r.get("run_id")),
         )
     for r in data.get("playlists", []):
         conn.execute(
-            """INSERT INTO playlists (canonical_id,name,description,image,updated)
-               VALUES (?,?,?,?,?)
+            """INSERT INTO playlists (canonical_id,name,description,image,is_main,tags_json,updated)
+               VALUES (?,?,?,?,?,?,?)
                ON CONFLICT(canonical_id) DO UPDATE SET
                  name=excluded.name, description=COALESCE(excluded.description,description),
-                 image=COALESCE(excluded.image,image), updated=excluded.updated""",
-            (r["canonical_id"], r["name"], r.get("description"), r.get("image"), r.get("updated", now)),
+                 image=COALESCE(excluded.image,image),
+                 is_main=excluded.is_main, tags_json=excluded.tags_json,
+                 updated=excluded.updated""",
+            (r["canonical_id"], r["name"], r.get("description"), r.get("image"),
+             r.get("is_main", 0), r.get("tags_json", "[]"), r.get("updated", now)),
         )
     for r in data.get("playlist_links", []):
         conn.execute(
             "INSERT OR REPLACE INTO playlist_links (canonical_id,platform,platform_id) VALUES (?,?,?)",
             (r["canonical_id"], r["platform"], r["platform_id"]),
+        )
+    for r in data.get("playlist_groups", []):
+        conn.execute(
+            "INSERT OR REPLACE INTO playlist_groups (group_id, playlist_canonical_id, role) VALUES (?,?,?)",
+            (r["group_id"], r["playlist_canonical_id"], r.get("role", "copy")),
         )
     for r in data.get("playlist_tracks", []):
         conn.execute(

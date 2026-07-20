@@ -4,18 +4,36 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>ultrasonics - vault</title>
-    <meta name="description" content="master playlist vault">
     <link rel="shortcut icon" href="/static/images/favicon.ico">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.0/css/bulma.min.css">
     <link rel="stylesheet" type="text/css" href="https://unpkg.com/bulma-prefers-dark">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap">
     <link rel="stylesheet" href="/static/css/custom.css">
     <style>
-        .vault-stat { border: 1px solid var(--grey-dark); border-radius:4px; padding:1rem; text-align:center; }
-        .vault-stat .num { font-size:2rem; font-weight:700; color:var(--primary-1); }
-        .platform-dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--primary-1); margin-right:3px; }
-        .orphan-dot   { background:var(--primary-2); }
-        .pl-row td { vertical-align:middle; }
+        .vault-stat     { border:1px solid var(--grey-dark); border-radius:4px; padding:1rem; text-align:center; }
+        .vault-stat .num{ font-size:2rem; font-weight:700; color:var(--primary-1); }
+
+        /* star button */
+        .star-btn { background:none; border:none; cursor:pointer; font-size:1.1rem; padding:0 4px; opacity:.35; transition:opacity .15s; }
+        .star-btn.is-main { opacity:1; color:#f5c842; }
+        .star-btn:hover   { opacity:.8; }
+
+        /* tags */
+        .tag.vault-tag   { cursor:pointer; background:var(--grey-darker); color:var(--grey); border:1px solid var(--grey-dark); }
+        .tag.vault-tag:hover { border-color:var(--primary-1); color:var(--primary-1); }
+        .tag.vault-tag.is-active { background:var(--primary-1); color:#111; border-color:var(--primary-1); }
+
+        /* group badge */
+        .group-badge { font-size:.65rem; color:var(--primary-2); border:1px solid var(--primary-2); border-radius:3px; padding:1px 5px; margin-left:4px; }
+
+        /* filter bar */
+        #filter-bar { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; margin-bottom:1.2rem; }
+        #search-input { max-width:220px; }
+
+        tr.hidden-row { display:none; }
+
+        .pl-title a { color: inherit; }
+        .pl-title a:hover { color: var(--primary-1); }
     </style>
 </head>
 <body class="has-background-animated">
@@ -23,12 +41,13 @@
     <section class="section">
         <img src="/static/images/logo.svg">
 
+        <!-- header row -->
         <div class="columns is-vcentered mb-2">
             <div class="column">
                 <a href="/" class="button is-small">&#8592; back</a>
             </div>
             <div class="column has-text-centered">
-                <h2 class="title is-4">vault — master library</h2>
+                <h2 class="title is-4">vault <span class="has-text-grey is-size-6">— master library</span></h2>
             </div>
             <div class="column has-text-right">
                 <div class="buttons is-right">
@@ -38,7 +57,7 @@
             </div>
         </div>
 
-        <!-- Stats bar -->
+        <!-- stats -->
         <div class="columns mb-4">
             <div class="column"><div class="vault-stat"><div class="num">{{ stats.tracks }}</div><div>tracks</div></div></div>
             <div class="column"><div class="vault-stat"><div class="num">{{ stats.playlists }}</div><div>playlists</div></div></div>
@@ -46,33 +65,76 @@
         </div>
 
         {% if playlists %}
-        <table class="table is-fullwidth is-hoverable is-striped">
+        <!-- filter bar -->
+        <div id="filter-bar">
+            <input id="search-input" class="input is-small" type="text" placeholder="search playlists..."
+                   oninput="applyFilters()">
+            <label class="tag vault-tag" id="filter-main" onclick="toggleFilter('main')">&#9733; main only</label>
+            {% for t in all_tags %}
+            <label class="tag vault-tag" data-tag="{{ t }}" onclick="toggleFilter('tag','{{ t }}')">{{ t }}</label>
+            {% endfor %}
+            {% if all_tags %}
+            <a class="is-size-7 has-text-grey" onclick="clearFilters()" style="cursor:pointer">clear filters</a>
+            {% endif %}
+        </div>
+
+        <!-- playlist table -->
+        <table class="table is-fullwidth is-hoverable is-striped" id="pl-table">
             <thead>
                 <tr>
-                    <th>Playlist</th>
-                    <th>Tracks</th>
+                    <th style="width:28px"></th>
+                    <th onclick="sortTable(1)" style="cursor:pointer">Playlist</th>
+                    <th onclick="sortTable(2)" style="cursor:pointer; width:70px">Tracks</th>
+                    <th>Tags</th>
                     <th>Platforms</th>
-                    <th>Last Updated</th>
-                    <th></th>
+                    <th onclick="sortTable(5)" style="cursor:pointer; width:130px">Updated</th>
+                    <th style="width:60px"></th>
                 </tr>
             </thead>
-            <tbody>
+            <tbody id="pl-tbody">
                 {% for pl in playlists %}
-                <tr class="pl-row">
+                <tr class="pl-row"
+                    data-name="{{ pl.name | lower }}"
+                    data-main="{{ '1' if pl.is_main else '0' }}"
+                    data-tags="{{ pl.tags | join(',') | lower }}">
+                    <!-- star -->
                     <td>
-                        <a href="/vault/playlist/{{ pl.canonical_id }}" class="p1">{{ pl.name }}</a>
+                        <form method="POST" action="/vault/playlist/{{ pl.canonical_id }}" style="display:inline">
+                            <input type="hidden" name="action" value="set_main">
+                            <input type="hidden" name="is_main" value="{{ '0' if pl.is_main else '1' }}">
+                            <button type="submit" class="star-btn {{ 'is-main' if pl.is_main else '' }}"
+                                    title="{{ 'Unmark as main' if pl.is_main else 'Mark as main (source of truth)' }}">
+                                &#9733;
+                            </button>
+                        </form>
                     </td>
+                    <!-- name -->
+                    <td class="pl-title">
+                        <a href="/vault/playlist/{{ pl.canonical_id }}">{{ pl.name }}</a>
+                        {% if pl.group_size > 1 %}
+                        <span class="group-badge">{{ pl.group_size }} copies</span>
+                        {% endif %}
+                    </td>
+                    <!-- tracks -->
                     <td>{{ pl.track_count }}</td>
+                    <!-- tags -->
+                    <td>
+                        {% for tag in pl.tags %}
+                        <span class="tag is-small vault-tag" data-tag="{{ tag }}"
+                              onclick="toggleFilter('tag','{{ tag }}')">{{ tag }}</span>
+                        {% endfor %}
+                    </td>
+                    <!-- platforms -->
                     <td>
                         {% for p in pl.platforms %}
                         <span class="tag is-small">{{ p }}</span>
                         {% endfor %}
                     </td>
-                    <td>
-                        {% if pl.updated %}
-                        <span class="is-size-7">{{ pl.updated | int | strftime }}</span>
-                        {% endif %}
+                    <!-- updated -->
+                    <td class="is-size-7 has-text-grey">
+                        {% if pl.updated %}{{ pl.updated | int | strftime }}{% endif %}
                     </td>
+                    <!-- view btn -->
                     <td>
                         <a href="/vault/playlist/{{ pl.canonical_id }}" class="button is-small">view</a>
                     </td>
@@ -80,10 +142,14 @@
                 {% endfor %}
             </tbody>
         </table>
+
         {% else %}
         <div class="notification is-info is-light has-text-centered">
             <p>The vault is empty.</p>
-            <p class="is-size-7 mt-2">Run an applet with any input plugin and the vault will populate automatically.</p>
+            <p class="is-size-7 mt-2">
+                Run any applet with an input plugin and playlists will appear here automatically.
+                Or add a <strong>vault</strong> plugin as the output in an applet.
+            </p>
         </div>
         {% endif %}
 
@@ -92,5 +158,70 @@
         <p><strong>ultrasonics</strong> by <a class="p1" href="https://github.com/XDGFX/ultrasonics">XDGFX</a>. do more with your music.</p>
     </div>
 </div>
+
+<script>
+let activeMainFilter = false;
+let activeTagFilter  = null;
+
+function applyFilters() {
+    const query    = document.getElementById('search-input').value.toLowerCase();
+    const rows     = document.querySelectorAll('#pl-tbody .pl-row');
+    rows.forEach(row => {
+        const name    = row.dataset.name  || '';
+        const isMain  = row.dataset.main  === '1';
+        const tags    = row.dataset.tags  || '';
+        let visible   = true;
+        if (query            && !name.includes(query))        visible = false;
+        if (activeMainFilter && !isMain)                       visible = false;
+        if (activeTagFilter  && !tags.split(',').includes(activeTagFilter)) visible = false;
+        row.classList.toggle('hidden-row', !visible);
+    });
+}
+
+function toggleFilter(type, value) {
+    if (type === 'main') {
+        activeMainFilter = !activeMainFilter;
+        document.getElementById('filter-main').classList.toggle('is-active', activeMainFilter);
+    } else if (type === 'tag') {
+        if (activeTagFilter === value) {
+            activeTagFilter = null;
+        } else {
+            activeTagFilter = value;
+        }
+        document.querySelectorAll('.vault-tag[data-tag]').forEach(el => {
+            el.classList.toggle('is-active', el.dataset.tag === activeTagFilter);
+        });
+    }
+    applyFilters();
+}
+
+function clearFilters() {
+    activeMainFilter = false;
+    activeTagFilter  = null;
+    document.getElementById('filter-main').classList.remove('is-active');
+    document.querySelectorAll('.vault-tag[data-tag]').forEach(el => el.classList.remove('is-active'));
+    document.getElementById('search-input').value = '';
+    applyFilters();
+}
+
+// Simple single-column sort
+let sortDir = {};
+function sortTable(col) {
+    const tbody = document.getElementById('pl-tbody');
+    const rows  = Array.from(tbody.querySelectorAll('.pl-row'));
+    const asc   = !sortDir[col];
+    sortDir = {};
+    sortDir[col] = asc;
+    rows.sort((a, b) => {
+        const tds = (r) => Array.from(r.querySelectorAll('td'));
+        const av  = tds(a)[col]?.innerText.trim() ?? '';
+        const bv  = tds(b)[col]?.innerText.trim() ?? '';
+        // numeric sort for track count
+        if (col === 2) return asc ? (+av - +bv) : (+bv - +av);
+        return asc ? av.localeCompare(bv) : bv.localeCompare(av);
+    });
+    rows.forEach(r => tbody.appendChild(r));
+}
+</script>
 </body>
 </html>
